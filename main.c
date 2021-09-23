@@ -5,6 +5,7 @@
 #include "bwalib/utils.h"
 #include "bwamem/bwamem.h"
 #include "time_prof.h"
+#include "zipmem.h"
 
 KSEQ_DECLARE(gzFile)
 
@@ -31,7 +32,8 @@ int main(int argc, char *argv[]) {
 	mem_opt_t *opt = mem_opt_init();
 	bseq1_t *seqs = bseq_read(actual_chunk_size, &n_seqs, ks, NULL);
 
-	mem_process_seqs(opt, idx->bwt, idx->bns, idx->pac, 0, n_seqs, seqs, NULL);
+	zip_process_seqs(opt, idx->bwt, idx->bns, idx->pac, 0, n_seqs, seqs);
+
 	int i;
 	for (i = 0; i < n_seqs; i++) {
 		fprintf(stdout, "%s", seqs[i].sam);
