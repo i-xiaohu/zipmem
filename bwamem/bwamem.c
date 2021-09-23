@@ -34,7 +34,6 @@
 #include <pthread.h>
 #endif
 
-#include "../cstl/kstring.h"
 #include "../cstl/kvec.h"
 #include "../cstl/ksort.h"
 #include "../cstl/kbtree.h"
@@ -192,27 +191,11 @@ static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, co
  * Chaining *
  ************/
 
-typedef struct {
-	int64_t rbeg;
-	int32_t qbeg, len;
-	int score;
-} mem_seed_t; // unaligned memory
-
-typedef struct {
-	int n, m, first, rid;
-	uint32_t w:29, kept:2, is_alt:1;
-	float frac_rep;
-	int64_t pos;
-	mem_seed_t *seeds;
-} mem_chain_t;
-
-typedef struct { size_t n, m; mem_chain_t *a;  } mem_chain_v;
-
 #define chain_cmp(a, b) (((b).pos < (a).pos) - ((a).pos < (b).pos))
 KBTREE_INIT(chn, mem_chain_t, chain_cmp)
 
 // return 1 if the seed is merged into the chain
-static int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c, const mem_seed_t *p, int seed_rid)
+int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c, const mem_seed_t *p, int seed_rid)
 {
 	int64_t qend, rend, x, y;
 	const mem_seed_t *last = &c->seeds[c->n-1];
@@ -515,7 +498,7 @@ int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns, const uint8_
 
 typedef kvec_t(int) int_v;
 
-static void mem_mark_primary_se_core(const mem_opt_t *opt, int n, mem_alnreg_t *a, int_v *z)
+void mem_mark_primary_se_core(const mem_opt_t *opt, int n, mem_alnreg_t *a, int_v *z)
 { // similar to the loop in mem_chain_flt()
 	int i, k, tmp;
 	tmp = opt->a + opt->b;

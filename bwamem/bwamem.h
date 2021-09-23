@@ -27,6 +27,7 @@
 #ifndef BWAMEM_H_
 #define BWAMEM_H_
 
+#include "../cstl/kstring.h"
 #include "../FM_index//bwt.h"
 #include "../FM_index/bntseq.h"
 #include "../bwalib/bwa.h"
@@ -82,6 +83,22 @@ typedef struct {
 	int max_XA_hits, max_XA_hits_alt; // if there are max_hits or fewer, output them all
 	int8_t mat[25];         // scoring matrix; mat[0] == 0 if unset
 } mem_opt_t;
+
+typedef struct {
+	int64_t rbeg;
+	int32_t qbeg, len;
+	int score;
+} mem_seed_t; // unaligned memory
+
+typedef struct {
+	int n, m, first, rid;
+	uint32_t w:29, kept:2, is_alt:1;
+	float frac_rep;
+	int64_t pos;
+	mem_seed_t *seeds;
+} mem_chain_t;
+
+typedef struct { size_t n, m; mem_chain_t *a;  } mem_chain_v;
 
 typedef struct {
 	int64_t rb, re; // [rb,re): reference sequence in the alignment
@@ -160,6 +177,13 @@ extern "C" {
 	 */
 	void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed, int n, bseq1_t *seqs, const mem_pestat_t *pes0);
 
+	int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c, const mem_seed_t *p, int seed_rid);
+	int mem_chain_flt(const mem_opt_t *opt, int n_chn, mem_chain_t *a);
+	void mem_chain2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, int l_query, const uint8_t *query, const mem_chain_t *c, mem_alnreg_v *av);
+	int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, uint8_t *query, int n, mem_alnreg_t *a);
+	int mem_mark_primary_se(const mem_opt_t *opt, int n, mem_alnreg_t *a, int64_t id);
+	void mem_reorder_primary5(int T, mem_alnreg_v *a);
+
 	/**
 	 * Find the aligned regions for one query sequence
 	 *
@@ -194,6 +218,8 @@ extern "C" {
 
 	// ONLY work after mem_mark_primary_se()
 	char **mem_gen_alt(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_alnreg_v *a, int l_query, const char *query);
+
+	void mem_aln2sam(const mem_opt_t *opt, const bntseq_t *bns, kstring_t *str, bseq1_t *s, int n, const mem_aln_t *list, int which, const mem_aln_t *m_);
 
 	/**
 	 * Infer the insert size distribution from interleaved alignment regions
