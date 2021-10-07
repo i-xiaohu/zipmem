@@ -1290,23 +1290,23 @@ static void seeding_worker(void *data, long i, int tid) {
 		bwtintv_t *p = &aux->mem.a[i];
 		bytes_n += 8 * (p->x[2] > opt->max_occ ? opt->max_occ : p->x[2]); // Occurrence locations
 	}
-//	read->sam = malloc(bytes_n);
-//	*(int*)(read->sam + pointer) = aux->mem.n; pointer += sizeof(int);
-	kstring_t tmp_str; memset(&tmp_str, 0, sizeof(tmp_str));
-	ksprintf(&tmp_str, "%d\n", aux->mem.n);
+	read->l_seq = bytes_n;
+	read->sam = malloc(bytes_n);
+	*(int*)(read->sam + pointer) = aux->mem.n; pointer += sizeof(int);
 	for (i = 0; i < aux->mem.n; ++i) {
 		bwtintv_t *p = &aux->mem.a[i];
 		int step, count, slen = (uint32_t)p->info - (p->info>>32); // seed length
-		ksprintf(&tmp_str, "%d %d %ld\n", p->info>>32, slen, p->x[2]);
+		*(int*)(read->sam + pointer) = p->info>>32; pointer += sizeof(int);
+		*(int*)(read->sam + pointer) = slen; pointer += sizeof(int);
+		*(long*)(read->sam + pointer) = p->x[2]; pointer += sizeof(long);
 		int64_t k;
 		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
 		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
 			int64_t rb = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
-			ksprintf(&tmp_str, "%ld ", rb);
+			*(long*)(read->sam + pointer) = rb; pointer += sizeof(long);
 		}
-		ksprintf(&tmp_str, "\n");
 	}
-	read->sam = tmp_str.s;
+	assert(pointer == bytes_n);
 }
 
 void mem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
