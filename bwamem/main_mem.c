@@ -36,13 +36,10 @@
 #include "../bwalib/utils.h"
 #include "../bwalib/kopen.h"
 #include "../bwalib/kseq.h"
+#include "../cstl/kthread.h"
 #include "bwamem.h"
 
 KSEQ_DECLARE(gzFile)
-
-extern unsigned char nst_nt4_table[256];
-
-void kt_pipeline(int n_threads, void *(*func)(void*, int, void*), void *shared_data, int n_steps);
 
 typedef struct {
 	kseq_t *ks, *ks2;
@@ -59,7 +56,8 @@ typedef struct {
 	bseq1_t *seqs;
 } ktp_data_t;
 
-static void *process(void *shared, int step, void *_data)
+// Three steps of pipeline for seeding: input, seeding, output.
+static void *tp_seeding(void *shared, int step, void *_data)
 {
 	ktp_aux_t *aux = (ktp_aux_t*)shared;
 	ktp_data_t *data = (ktp_data_t*)_data;
@@ -80,41 +78,26 @@ static void *process(void *shared, int step, void *_data)
 			}
 		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[M::%s] read %d sequences (%ld bp)...\n", __func__, ret->n_seqs, (long)size);
+			fprintf(stderr, "[%s_step1] Input %d reads (%ld bp)\n", __func__, ret->n_seqs, (long)size);
 		return ret;
 	} else if (step == 1) {
 		const mem_opt_t *opt = aux->opt;
 		const bwaidx_t *idx = aux->idx;
-		if (opt->flag & MEM_F_SMARTPE) {
-			bseq1_t *sep[2];
-			int n_sep[2];
-			mem_opt_t tmp_opt = *opt;
-			bseq_classify(data->n_seqs, data->seqs, n_sep, sep);
-			if (bwa_verbose >= 3)
-				fprintf(stderr, "[M::%s] %d single-end sequences; %d paired-end sequences\n", __func__, n_sep[0], n_sep[1]);
-			if (n_sep[0]) {
-				tmp_opt.flag &= ~MEM_F_PE;
-				mem_process_seqs(&tmp_opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, n_sep[0], sep[0], 0);
-				for (i = 0; i < n_sep[0]; ++i)
-					data->seqs[sep[0][i].id].sam = sep[0][i].sam;
-			}
-			if (n_sep[1]) {
-				tmp_opt.flag |= MEM_F_PE;
-				mem_process_seqs(&tmp_opt, idx->bwt, idx->bns, idx->pac, aux->n_processed + n_sep[0], n_sep[1], sep[1], aux->pes0);
-				for (i = 0; i < n_sep[1]; ++i)
-					data->seqs[sep[1][i].id].sam = sep[1][i].sam;
-			}
-			free(sep[0]); free(sep[1]);
-		} else mem_process_seqs(opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, data->n_seqs, data->seqs, aux->pes0);
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Process reads\n", __func__ );
+		mem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		aux->n_processed += data->n_seqs;
 		return data;
 	} else if (step == 2) {
 		for (i = 0; i < data->n_seqs; ++i) {
-			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
+			// l_seq is used to record the total bytes, sam stores seeds.
+			fwrite(data->seqs[i].sam, sizeof(uint8_t), data->seqs[i].l_seq, stdout);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual); free(data->seqs[i].sam);
 		}
 		free(data->seqs); free(data);
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step3] Output seeds. %ld reads have been processed\n", __func__ , aux->n_processed);
 		return 0;
 	}
 	return 0;
@@ -134,6 +117,38 @@ static void update_a(mem_opt_t *opt, const mem_opt_t *opt0)
 		if (!opt0->pen_clip3) opt->pen_clip3 *= opt->a;
 		if (!opt0->pen_unpaired) opt->pen_unpaired *= opt->a;
 	}
+}
+
+void temp_function() {
+	FILE *temp1 = fopen("/vol1/agis/ruanjue_group/jifahu/zsmem-experiments/zipmem/spring_L100_N10000_1.bin_seeds", "rb");
+	FILE *temp2 = fopen("/vol1/agis/ruanjue_group/jifahu/zsmem-experiments/zipmem/spring_L100_N10000_1.text_seeds", "r");
+	int i, j, reads_n = 0;
+	do {
+		int cluster_n; fread(&cluster_n, sizeof(cluster_n), 1, temp1);
+		int cluster_n2; fscanf(temp2, "%d", &cluster_n2);
+		if (feof(temp1) || feof(temp2)) {
+			fprintf(stderr, "%d reads, bin:%d text:%d\n", reads_n, feof(temp1), feof(temp2));
+			break;
+		}
+		assert(cluster_n == cluster_n2);
+		for (i = 0; i < cluster_n; i++) {
+			int qb, l; long sa_size;
+			fread(&qb, sizeof(int), 1, temp1);
+			fread(&l, sizeof(int), 1, temp1);
+			fread(&sa_size, sizeof(long), 1, temp1);
+			int qb2, l2; long sa_size2;
+			fscanf(temp2, "%d %d %ld", &qb2, &l2, &sa_size2);
+			assert(qb == qb2); assert(l == l2); assert(sa_size == sa_size2);
+			int occ = sa_size > 500 ?500 :sa_size;
+			for (j = 0; j < occ; j++) {
+				long pos, pos2;
+				fread(&pos, sizeof(long), 1, temp1);
+				fscanf(temp2, "%ld", &pos2);
+				assert(pos == pos2);
+			}
+		}
+		reads_n++;
+	} while (1);
 }
 
 int main(int argc, char *argv[])
@@ -263,7 +278,7 @@ int main(int argc, char *argv[])
 	if (opt->n_threads < 1) opt->n_threads = 1;
 	if (optind + 1 >= argc || optind + 3 < argc) {
 		fprintf(stderr, "\n");
-		fprintf(stderr, "Usage: bwa mem [options] <idxbase> <in1.fq> [in2.fq]\n\n");
+		fprintf(stderr, "Usage: bwamem [options] <idxbase> <in1.fq> [in2.fq]\n\n");
 		fprintf(stderr, "Algorithm options:\n\n");
 		fprintf(stderr, "       -t INT        number of threads [%d]\n", opt->n_threads);
 		fprintf(stderr, "       -k INT        minimum seed length [%d]\n", opt->min_seed_len);
@@ -381,9 +396,9 @@ int main(int argc, char *argv[])
 			opt->flag |= MEM_F_PE;
 		}
 	}
-	bwa_print_sam_hdr(aux.idx->bns, hdr_line);
+//	bwa_print_sam_hdr(aux.idx->bns, hdr_line);
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
-	kt_pipeline(no_mt_io? 1 : 2, process, &aux, 3);
+	kt_pipeline(no_mt_io? 1 : 2, tp_seeding, &aux, 3);
 	free(hdr_line);
 	free(opt);
 	bwa_idx_destroy(aux.idx);
