@@ -154,6 +154,15 @@ extern "C" {
 	void mem_fill_scmat(int a, int b, int8_t mat[25]);
 
 	/**
+	 * Seeding for a batch of sequences
+	 * Here, $seqs[i].sam is storing seeds in format of seed clusters.
+	 * At the beginning, the number of seed clusters.
+	 * Each seed cluster represents the substring of query read and the corresponding occurrence locations on reference.
+	 * Specifically, (qb, l, score, occ, pos1, pos2, pos3 ...)
+	 */
+	void mem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs);
+
+	/**
 	 * Align a batch of sequences and generate the alignments in the SAM format
 	 *
 	 * This routine requires $seqs[i].{l_seq,seq,name} and write $seqs[i].sam.

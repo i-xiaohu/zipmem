@@ -37,6 +37,7 @@
 #include "../cstl/kvec.h"
 #include "../cstl/ksort.h"
 #include "../cstl/kbtree.h"
+#include "../cstl/kthread.h"
 #include "../FM_index/bntseq.h"
 #include "../bwalib/ksw.h"
 #include "../bwalib/utils.h"
@@ -1270,29 +1271,53 @@ static void worker2(void *data, int i, int tid)
 	}
 }
 
-void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed, int n, bseq1_t *seqs, const mem_pestat_t *pes0)
-{
-	extern void kt_for(int n_threads, void (*func)(void*,int,int), void *data, int n);
+static void seeding_worker(void *data, long i, int tid) {
+	worker_t *w = (worker_t*)data;
+	const mem_opt_t *opt = w->opt;
+	const bwt_t *bwt = w->bwt;
+	bseq1_t *read = &w->seqs[i];
+	smem_aux_t *aux = w->aux[tid];
+
+	for (i = 0; i < read->l_seq; ++i) {
+		// A -> 0, C -> 1, G -> 2, T -> 3, N -> 4, ...
+		read->seq[i] = read->seq[i] < 4 ?read->seq[i] :nst_nt4_table[(int)read->seq[i]];
+	}
+	mem_collect_intv(opt, bwt, read->l_seq, (uint8_t*)read->seq, aux);
+
+	int64_t bytes_n = 4, pointer = 0;
+	for (i = 0; i < aux->mem.n; i++) { // Seed cluster
+		bytes_n += 4 + 4 + 8; // qb, l, SA size,
+		bwtintv_t *p = &aux->mem.a[i];
+		bytes_n += 8 * (p->x[2] > opt->max_occ ? opt->max_occ : p->x[2]); // Occurrence locations
+	}
+//	read->sam = malloc(bytes_n);
+//	*(int*)(read->sam + pointer) = aux->mem.n; pointer += sizeof(int);
+	kstring_t tmp_str; memset(&tmp_str, 0, sizeof(tmp_str));
+	ksprintf(&tmp_str, "%d\n", aux->mem.n);
+	for (i = 0; i < aux->mem.n; ++i) {
+		bwtintv_t *p = &aux->mem.a[i];
+		int step, count, slen = (uint32_t)p->info - (p->info>>32); // seed length
+		ksprintf(&tmp_str, "%d %d %ld\n", p->info>>32, slen, p->x[2]);
+		int64_t k;
+		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
+		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
+			int64_t rb = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
+			ksprintf(&tmp_str, "%ld ", rb);
+		}
+		ksprintf(&tmp_str, "\n");
+	}
+	read->sam = tmp_str.s;
+}
+
+void mem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
 	worker_t w;
-	mem_pestat_t pes[4];
-	double ctime, rtime;
 	int i;
 
-	ctime = cputime(); rtime = realtime();
-	global_bns = bns;
-	w.regs = malloc(n * sizeof(mem_alnreg_v));
-	w.opt = opt; w.bwt = bwt; w.bns = bns; w.pac = pac;
-	w.seqs = seqs; w.n_processed = n_processed;
-	w.pes = &pes[0];
+	w.opt = opt;
+	w.bwt = bwt;
+	w.seqs = seqs;
 	w.aux = malloc(opt->n_threads * sizeof(smem_aux_t));
 	for (i = 0; i < opt->n_threads; ++i)
 		w.aux[i] = smem_aux_init();
-	kt_for(opt->n_threads, worker1, &w, (opt->flag&MEM_F_PE)? n>>1 : n); // find mapping positions
-	for (i = 0; i < opt->n_threads; ++i)
-		smem_aux_destroy(w.aux[i]);
-	free(w.aux);
-	kt_for(opt->n_threads, worker2, &w, (opt->flag&MEM_F_PE)? n>>1 : n); // generate alignment
-	free(w.regs);
-	if (bwa_verbose >= 3)
-		fprintf(stderr, "[M::%s] Processed %d reads in %.3f CPU sec, %.3f real sec\n", __func__, n, cputime() - ctime, realtime() - rtime);
+	kt_for(opt->n_threads, seeding_worker, &w, n); // Seeding for candidate alignments
 }
