@@ -1,29 +1,3 @@
-/* The MIT License
-
-   Copyright (c) 2018-     Dana-Farber Cancer Institute
-                 2009-2018 Broad Institute, Inc.
-                 2008-2009 Genome Research Ltd. (GRL)
-
-   Permission is hereby granted, free of charge, to any person obtaining
-   a copy of this software and associated documentation files (the
-   "Software"), to deal in the Software without restriction, including
-   without limitation the rights to use, copy, modify, merge, publish,
-   distribute, sublicense, and/or sell copies of the Software, and to
-   permit persons to whom the Software is furnished to do so, subject to
-   the following conditions:
-
-   The above copyright notice and this permission notice shall be
-   included in all copies or substantial portions of the Software.
-
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
-   BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
-   ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   SOFTWARE.
-*/
 #include <zlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -38,6 +12,10 @@
 #include "../bwalib/kseq.h"
 #include "../cstl/kthread.h"
 #include "bwamem.h"
+
+#ifndef BWA_PACKAGE_VERSION
+#define BWA_PACKAGE_VERSION "0.7.17-r1188"
+#endif
 
 KSEQ_DECLARE(gzFile)
 
@@ -91,8 +69,9 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 		return data;
 	} else if (step == 2) {
 		for (i = 0; i < data->n_seqs; ++i) {
-			// l_seq is used to record the total bytes, sam stores seeds.
-			fwrite(data->seqs[i].sam, sizeof(uint8_t), data->seqs[i].l_seq, stdout);
+			// sam here is used to stores the seeds and the preceding number indicating memory cost.
+			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
+			fwrite(data->seqs[i].sam, sizeof(uint8_t), bytes, stdout);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual); free(data->seqs[i].sam);
 		}
@@ -191,6 +170,30 @@ int seeding_main(int argc, char *argv[]) {
 	return 0;
 }
 
+void output_seeds(int n, uint8_t **all_seeds, bseq1_t *reads) {
+	int r, i, j;
+	for (r = 0; r < n; r++) {
+		long pointer = 0;
+		uint8_t *seeds = all_seeds[r];
+		int mem_n = *(int*)(seeds + pointer); pointer += sizeof(int);
+		kstring_t tmp = {0, 0, 0};
+		ksprintf(&tmp, "%d\n", mem_n);
+		for (i = 0; i < mem_n; ++i) {
+			int qb = *(int*)(seeds + pointer); pointer += sizeof(int);
+			int slen = *(int*)(seeds + pointer); pointer += sizeof(int);
+			long sa_size = *(long*)(seeds + pointer); pointer += sizeof(long);
+			ksprintf(&tmp, "%d %d %ld\n", qb, slen, sa_size);
+			int true_occ = sa_size < 500 ?sa_size :500;
+			for (j = 0; j < true_occ; j++) {
+				long pos = *(long*)(seeds + pointer); pointer += sizeof(long);
+				ksprintf(&tmp, "%ld ", pos);
+			}
+			ksprintf(&tmp, "\n");
+		}
+		reads[r].sam = tmp.s;
+	}
+}
+
 // Three steps of pipeline for extending: input seeds and reads, extending, output SAM.
 static void *tp_extending(void *shared, int step, void *_data) {
 	ktp_aux_t *aux = (ktp_aux_t*)shared;
@@ -230,7 +233,8 @@ static void *tp_extending(void *shared, int step, void *_data) {
 		const bwaidx_t *idx = aux->idx;
 		if (bwa_verbose >= 3)
 			fprintf(stderr, "[%s_step2] Process reads\n", __func__ );
-//		mem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
+//		output_seeds(data->n_seqs, data->seeds, data->seqs);
+		mem_extend(opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, data->n_seqs, data->seeds, data->seqs, aux->pes0);
 		aux->n_processed += data->n_seqs;
 		return data;
 	} else if (step == 2) {
@@ -238,9 +242,10 @@ static void *tp_extending(void *shared, int step, void *_data) {
 			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual);
-			free(data->seeds[i]); free(data->seqs[i].sam);
+			free(data->seqs[i].sam);
+			// Seeds are deallocated by the core function in step2.
 		}
-		free(data->seqs); free(data->seeds); free(data);
+		free(data->seqs); free(data);
 		if (bwa_verbose >= 3)
 			fprintf(stderr, "[%s_step3] Output SAM. %ld reads have been processed\n", __func__ , aux->n_processed);
 		return 0;
@@ -422,7 +427,7 @@ int extend_main(int argc, char *argv[]) {
 static int usage() {
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Usage: bwamem <seeding / extend>\n");
-	fprintf(stderr, "  BWA-MEM follows the seed-and-extend paradigm\n");
+	fprintf(stderr, "  BWA-MEM (version %s) follows the seed-and-extend paradigm\n", BWA_PACKAGE_VERSION);
 	fprintf(stderr, "  Command `seeding` is collecting candidate hits for query reads\n");
 	fprintf(stderr, "  Command `extend` performs Smith-Waterman around seeds for final alignments\n");
 	fprintf(stderr, "  In BWA source, they are an entity, we split them for testing zip-seeding\n");
@@ -436,10 +441,29 @@ static int usage() {
 
 int main(int argc, char *argv[]) {
 	if (argc == 1) return usage();
+	int i, ret;
+	extern char *bwa_pg;
+	kstring_t pg = {0,0,0};
+	ksprintf(&pg, "@PG\tID:bwamem\tPN:bwamem\tVN:%s\tCL:%s", BWA_PACKAGE_VERSION, argv[0]);
+	for (i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
+	bwa_pg = pg.s;
+
 	double rtime = realtime();
-	if (!strcmp(argv[1], "seeding")) seeding_main(argc-1, argv+1);
-	else if (!strcmp(argv[1], "extend")) extend_main(argc-1, argv+1);
-	else fprintf(stderr, "Only commands `seeding` and `extend` are allowed\n");
-	fprintf(stderr, "Time cost for %s: %.2f real sec, %.2f CPU sec\n", argv[1], realtime()-rtime, cputime());
+	if (!strcmp(argv[1], "seeding")) ret = seeding_main(argc-1, argv+1);
+	else if (!strcmp(argv[1], "extend")) ret = extend_main(argc-1, argv+1);
+	else {
+		ret = 1;
+		fprintf(stderr, "Only commands `seeding` and `extend` are allowed\n");
+	}
+	err_fflush(stdout);
+	err_fclose(stdout);
+	if (ret == 0) {
+		fprintf(stderr, "BWA-MEM Version: %s\n", BWA_PACKAGE_VERSION);
+		fprintf(stderr, "CMD:");
+		for (i = 0; i < argc; ++i) fprintf(stderr, " %s", argv[i]);
+		fprintf(stderr, "\n");
+		fprintf(stderr, "Time cost for %s: %.2f real sec, %.2f CPU sec\n", argv[1], realtime()-rtime, cputime());
+	}
+	free(bwa_pg);
 	return 0;
 }
