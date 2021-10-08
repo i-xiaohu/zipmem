@@ -144,14 +144,7 @@ typedef struct { // This struct is only used for the convenience of API.
 extern "C" {
 #endif
 
-	smem_i *smem_itr_init(const bwt_t *bwt);
-	void smem_itr_destroy(smem_i *itr);
-	void smem_set_query(smem_i *itr, int len, const uint8_t *query);
-	void smem_config(smem_i *itr, int min_intv, int max_len, uint64_t max_intv);
-	const bwtintv_v *smem_next(smem_i *itr);
-
 	mem_opt_t *mem_opt_init(void);
-	void mem_fill_scmat(int a, int b, int8_t mat[25]);
 
 	/**
 	 * Seeding for a batch of sequences
@@ -168,53 +161,13 @@ extern "C" {
 	void mem_extend(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed,
 					   int n, uint8_t **seeds, bseq1_t *seqs, const mem_pestat_t *pes0);
 
-	/**
-	 * Align a batch of sequences and generate the alignments in the SAM format
-	 *
-	 * This routine requires $seqs[i].{l_seq,seq,name} and write $seqs[i].sam.
-	 * Note that $seqs[i].sam may consist of several SAM lines if the
-	 * corresponding sequence has multiple primary hits.
-	 *
-	 * In the paired-end mode (i.e. MEM_F_PE is set in $opt->flag), query
-	 * sequences must be interleaved: $n must be an even number and the 2i-th
-	 * sequence and the (2i+1)-th sequence constitute a read pair. In this
-	 * mode, there should be enough (typically >50) unique pairs for the
-	 * routine to infer the orientation and insert size.
-	 *
-	 * @param opt    alignment parameters
-	 * @param bwt    FM-index of the reference sequence
-	 * @param bns    Information of the reference
-	 * @param pac    2-bit encoded reference
-	 * @param n      number of query sequences
-	 * @param seqs   query sequences; $seqs[i].seq/sam to be modified after the call
-	 * @param pes0   insert-size info; if NULL, infer from data; if not NULL, it should be an array with 4 elements,
-	 *               corresponding to each FF, FR, RF and RR orientation. See mem_pestat() for more info.
-	 */
-	void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed, int n, bseq1_t *seqs, const mem_pestat_t *pes0);
-
 	int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c, const mem_seed_t *p, int seed_rid);
 	int mem_chain_flt(const mem_opt_t *opt, int n_chn, mem_chain_t *a);
 	void mem_chain2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, int l_query, const uint8_t *query, const mem_chain_t *c, mem_alnreg_v *av);
 	int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, uint8_t *query, int n, mem_alnreg_t *a);
 	int mem_mark_primary_se(const mem_opt_t *opt, int n, mem_alnreg_t *a, int64_t id);
 	void mem_reorder_primary5(int T, mem_alnreg_v *a);
-
-	/**
-	 * Find the aligned regions for one query sequence
-	 *
-	 * Note that this routine does not generate CIGAR. CIGAR should be
-	 * generated later by mem_reg2aln() below.
-	 *
-	 * @param opt    alignment parameters
-	 * @param bwt    FM-index of the reference sequence
-	 * @param bns    Information of the reference
-	 * @param pac    2-bit encoded reference
-	 * @param l_seq  length of query sequence
-	 * @param seq    query sequence
-	 *
-	 * @return       list of aligned regions.
-	 */
-	mem_alnreg_v mem_align1(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, const char *seq);
+	int mem_approx_mapq_se(const mem_opt_t *opt, const mem_alnreg_t *a);
 
 	/**
 	 * Generate CIGAR and forward-strand position from alignment region
@@ -229,12 +182,12 @@ extern "C" {
 	 * @return       CIGAR, strand, mapping quality and forward-strand position
 	 */
 	mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, int l_seq, const char *seq, const mem_alnreg_t *ar);
-	mem_aln_t mem_reg2aln2(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, int l_seq, const char *seq, const mem_alnreg_t *ar, const char *name);
 
 	// ONLY work after mem_mark_primary_se()
 	char **mem_gen_alt(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_alnreg_v *a, int l_query, const char *query);
 
 	void mem_aln2sam(const mem_opt_t *opt, const bntseq_t *bns, kstring_t *str, bseq1_t *s, int n, const mem_aln_t *list, int which, const mem_aln_t *m_);
+	void mem_reg2sam(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, bseq1_t *s, mem_alnreg_v *a, int extra_flag, const mem_aln_t *m);
 
 	/**
 	 * Infer the insert size distribution from interleaved alignment regions
@@ -249,6 +202,8 @@ extern "C" {
 	 * @param pes    inferred insert size distribution (output)
 	 */
 	void mem_pestat(const mem_opt_t *opt, int64_t l_pac, int n, const mem_alnreg_v *regs, mem_pestat_t pes[4]);
+	
+	int mem_sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_pestat_t pes[4], uint64_t id, bseq1_t s[2], mem_alnreg_v a[2]);
 
 #ifdef __cplusplus
 }

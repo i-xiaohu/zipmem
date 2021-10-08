@@ -1132,62 +1132,6 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
 	return a;
 }
 
-/***********************
- *** Extra functions ***
- ***********************/
-
-static inline int get_pri_idx(double XA_drop_ratio, const mem_alnreg_t *a, int i)
-{
-	int k = a[i].secondary_all;
-	if (k >= 0 && a[i].score >= a[k].score * XA_drop_ratio) return k;
-	return -1;
-}
-
-// Okay, returning strings is bad, but this has happened a lot elsewhere. If I have time, I need serious code cleanup.
-char **mem_gen_alt(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_alnreg_v *a, int l_query, const char *query)
-{
-	int i, k, r, *cnt, tot;
-	kstring_t *aln = 0, str = {0,0,0};
-	char **XA = 0, *has_alt;
-
-	cnt = calloc(a->n, sizeof(int));
-	has_alt = calloc(a->n, 1);
-	for (i = 0, tot = 0; i < a->n; ++i) {
-		r = get_pri_idx(opt->XA_drop_ratio, a->a, i);
-		if (r >= 0) {
-			++cnt[r], ++tot;
-			if (a->a[i].is_alt) has_alt[r] = 1;
-		}
-	}
-	if (tot == 0) goto end_gen_alt;
-	aln = calloc(a->n, sizeof(kstring_t));
-	for (i = 0; i < a->n; ++i) {
-		mem_aln_t t;
-		if ((r = get_pri_idx(opt->XA_drop_ratio, a->a, i)) < 0) continue;
-		if (cnt[r] > opt->max_XA_hits_alt || (!has_alt[r] && cnt[r] > opt->max_XA_hits)) continue;
-		t = mem_reg2aln(opt, bns, pac, l_query, query, &a->a[i]);
-		str.l = 0;
-		kputs(bns->anns[t.rid].name, &str);
-		kputc(',', &str); kputc("+-"[t.is_rev], &str); kputl(t.pos + 1, &str);
-		kputc(',', &str);
-		for (k = 0; k < t.n_cigar; ++k) {
-			kputw(t.cigar[k]>>4, &str);
-			kputc("MIDSHN"[t.cigar[k]&0xf], &str);
-		}
-		kputc(',', &str); kputw(t.NM, &str);
-		kputc(';', &str);
-		free(t.cigar);
-		kputsn(str.s, str.l, &aln[r]);
-	}
-	XA = calloc(a->n, sizeof(char*));
-	for (k = 0; k < a->n; ++k)
-		XA[k] = aln[k].s;
-
-	end_gen_alt:
-	free(has_alt); free(cnt); free(aln); free(str.s);
-	return XA;
-}
-
 typedef struct {
 	const mem_opt_t *opt;
 	const bwt_t *bwt;
@@ -1299,7 +1243,7 @@ static void extend_worker1(void *data, long seq_id, int t_id) {
 	w->regs[seq_id] = regs;
 }
 
-static void extend_worker2(void *data, long  i, int tid)
+static void extend_worker2(void *data, long i, int tid)
 {
 	worker_t *w = (worker_t*)data;
 	if (!(w->opt->flag&MEM_F_PE)) {
@@ -1308,7 +1252,7 @@ static void extend_worker2(void *data, long  i, int tid)
 		mem_reg2sam(w->opt, w->bns, w->pac, &w->seqs[i], &w->regs[i], 0, 0);
 		free(w->regs[i].a);
 	} else {
-//		mem_sam_pe(w->opt, w->bns, w->pac, w->pes, (w->n_processed>>1) + i, &w->seqs[i<<1], &w->regs[i<<1]);
+		mem_sam_pe(w->opt, w->bns, w->pac, w->pes, (w->n_processed>>1) + i, &w->seqs[i<<1], &w->regs[i<<1]);
 		free(w->regs[i<<1|0].a); free(w->regs[i<<1|1].a);
 	}
 }
@@ -1328,10 +1272,10 @@ void mem_extend(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, con
 	kt_for(opt->n_threads, extend_worker1, &w, n);
 	fclose(chainf);
 	free(seeds);
-//	if (opt->flag&MEM_F_PE) { // infer insert sizes if not provided
-//		if (pes0) memcpy(pes, pes0, 4 * sizeof(mem_pestat_t)); // if pes0 != NULL, set the insert-size distribution as pes0
-//		else mem_pestat(opt, bns->l_pac, n, w.regs, pes); // otherwise, infer the insert size distribution from data
-//	}
+	if (opt->flag&MEM_F_PE) { // infer insert sizes if not provided
+		if (pes0) memcpy(pes, pes0, 4 * sizeof(mem_pestat_t)); // if pes0 != NULL, set the insert-size distribution as pes0
+		else mem_pestat(opt, bns->l_pac, n, w.regs, pes); // otherwise, infer the insert size distribution from data
+	}
 	kt_for(opt->n_threads, extend_worker2, &w, (opt->flag&MEM_F_PE)? n>>1 : n); // generate alignment
 	free(w.regs);
 }

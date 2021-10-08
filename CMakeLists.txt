@@ -36,7 +36,8 @@ set(bwalib
 set(bwamem
         bwamem/bwamem.c
         bwamem/bwamem.h
-        )
+        bwamem/bwamem_extra.c
+        bwamem/bwamem_pair.c)
 
 add_executable(bwamem
         ${cstl}
