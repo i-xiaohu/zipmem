@@ -163,6 +163,12 @@ extern "C" {
 	void mem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs);
 
 	/**
+	 * Extending upstream seeds to alignments.
+	 */
+	void mem_extend(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed,
+					   int n, uint8_t **seeds, bseq1_t *seqs, const mem_pestat_t *pes0);
+
+	/**
 	 * Align a batch of sequences and generate the alignments in the SAM format
 	 *
 	 * This routine requires $seqs[i].{l_seq,seq,name} and write $seqs[i].sam.
