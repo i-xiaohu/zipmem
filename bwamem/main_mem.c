@@ -272,6 +272,7 @@ static int extend_usage() {
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Usage: bwamem extend [options] <FM-index> <mem.seeds> <in1.fq> [in2.fq] > aln.sam\n");
 	fprintf(stderr, "Seeds chaining options\n");
+	fprintf(stderr, "    -c INT    skip seeds with more than INT occurrences [500]\n");
 	fprintf(stderr, "    -D FLOAT      drop chains shorter than FLOAT fraction of the longest overlapping chain [0.5]\n");
 	fprintf(stderr, "    -W INT        discard a chain if seeded bases shorter than INT [0]\n");
 	fprintf(stderr, "    -G INT        maximum gap between seeds to chain [10000]\n");
@@ -320,12 +321,13 @@ int extend_main(int argc, char *argv[]) {
 
 	aux.opt = opt = mem_opt_init();
 	memset(&opt0, 0, sizeof(mem_opt_t));
-	while ((c = getopt(argc, argv, "t:K:v:1D:W:G:N:X:w:d:A:B:O:E:L:U:I:m:SPT:aC")) >= 0) {
+	while ((c = getopt(argc, argv, "t:K:v:1c:D:W:G:N:X:w:d:A:B:O:E:L:U:I:m:SPT:aC")) >= 0) {
 		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
 		else if (c == 'K') fixed_chunk_size = (int)strtol(optarg, NULL, 10);
 		else if (c == 'v') bwa_verbose = (int)strtol(optarg, NULL, 10);
 		else if (c == '1') no_mt_io = 1;
 		// Chaining
+		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
 		else if (c == 'D') opt->drop_ratio = strtof(optarg, NULL);
 		else if (c == 'W') opt->min_chain_weight = (int)strtol(optarg, NULL, 10);
 		else if (c == 'G') opt->max_chain_gap = (int)strtol(optarg, NULL, 10);
