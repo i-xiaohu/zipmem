@@ -1,9 +1,9 @@
 #include <stdio.h>
+#include "cstl/kthread.h"
 #include "bwalib/bwa.h"
 #include "bwalib/kseq.h"
 #include "bwalib/kopen.h"
 #include "bwalib/utils.h"
-#include "bwamem/bwamem.h"
 #include "time_prof.h"
 #include "zipmem.h"
 
@@ -11,36 +11,158 @@ KSEQ_DECLARE(gzFile)
 
 zsmem_prof_t zmp;
 
-int main(int argc, char *argv[]) {
-	bwaidx_t *idx = bwa_idx_load_from_shm(argv[1]);
-	if (idx == NULL) {
-		if ((idx = bwa_idx_load(argv[1], BWA_IDX_ALL)) == NULL) return 1;
-		else fprintf(stderr, "[%s] Load the FM-index from disk\n", __func__ );
-	} else {
-		fprintf(stderr, "[%s] Load the FM-index from shared memory\n", __func__);
+typedef struct {
+	kseq_t *ks, *ks2;
+	FILE *fseeds;
+	mem_opt_t *opt;
+	mem_pestat_t *pes0;
+	int64_t n_processed;
+	int copy_comment, actual_chunk_size;
+	bwaidx_t *idx;
+} ktp_aux_t;
+
+typedef struct {
+	ktp_aux_t *aux;
+	int n_seqs;
+	bseq1_t *seqs;
+	uint8_t **seeds;
+} ktp_data_t;
+
+// Three steps of pipeline for seeding: input reads, seeding, output seeds.
+static void *tp_seeding(void *shared, int step, void *_data) {
+	ktp_aux_t *aux = (ktp_aux_t*)shared;
+	ktp_data_t *data = (ktp_data_t*)_data;
+	int i;
+	if (step == 0) {
+		ktp_data_t *ret;
+		int64_t size = 0;
+		ret = calloc(1, sizeof(ktp_data_t));
+		ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		if (ret->seqs == 0) {
+			free(ret);
+			return 0;
+		}
+		if (!aux->copy_comment)
+			for (i = 0; i < ret->n_seqs; ++i) {
+				free(ret->seqs[i].comment);
+				ret->seqs[i].comment = 0;
+			}
+		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step1] Input %ldM bases\n", __func__, size / 1000 / 1000);
+		return ret;
+	} else if (step == 1) {
+		const mem_opt_t *opt = aux->opt;
+		const bwaidx_t *idx = aux->idx;
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Processing %d reads\n", __func__, data->n_seqs);
+		zipmem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
+		aux->n_processed += data->n_seqs;
+		return data;
+	} else if (step == 2) {
+		for (i = 0; i < data->n_seqs; ++i) {
+			// sam here is used to stores the seeds and the preceding number indicating memory cost.
+//			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
+//			fwrite(data->seqs[i].sam, sizeof(uint8_t), bytes, stdout);
+//			free(data->seqs[i].sam);
+			free(data->seqs[i].name); free(data->seqs[i].comment);
+			free(data->seqs[i].seq); free(data->seqs[i].qual);
+		}
+		free(data->seqs); free(data);
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step3] Output seeds. %ld reads have been processed\n", __func__ , aux->n_processed);
+		return 0;
 	}
-	int fd;
-	void *ko = kopen(argv[2], &fd);
-	if (ko == 0) {
-		if (bwa_verbose >= 1) fprintf(stderr, "[%s] Fail to open file `%s'.\n", __func__, argv[2]);
+	return 0;
+}
+
+static int usage() {
+	fprintf(stderr, "\n");
+	fprintf(stderr, "Usage: zipmem [options] <FM-index> <in1.fq> [in2.fq] > zip.seeds\n");
+	fprintf(stderr, "Seeding options:\n");
+	fprintf(stderr, "    -k INT    minimum seed length [19]\n");
+	fprintf(stderr, "    -r FLOAT  look for internal seeds inside a seed longer than {-k} * FLOAT [1.5]\n");
+	fprintf(stderr, "    -y INT    seed occurrence for the 3rd round seeding [20]\n");
+	fprintf(stderr, "    -c INT    skip seeds with more than INT occurrences [500]\n");
+	fprintf(stderr, "    -s INT    MEM SA size upper bound to trigger re-seeding [10]\n");
+	fprintf(stderr, "Common options(also suitable for `extend`):\n");
+	fprintf(stderr, "    -t INT    number of threads [1]\n");
+	fprintf(stderr, "    -K INT    process INT input bases in each batch regardless of nThreads (for reproducibility) [10M]\n");
+	fprintf(stderr, "    -v INT    verbosity level: 1=error, 2=warning, 3=message, 4+=debugging [%d]\n", bwa_verbose);
+	fprintf(stderr, "    -1        Disable multiple I/O threads.\n");
+	fprintf(stderr, "\n");
+	return 0;
+}
+
+int main(int argc, char *argv[]) {
+	if (argc == 1) return usage();
+	int c;
+	int no_mt_io = 0; // Multiple IO thread label
+	int fixed_chunk_size = -1;
+	int fd, fd2;
+	void *ko = 0, *ko2 = 0;
+	gzFile fp, fp2 = 0;
+	mem_opt_t *opt;
+	ktp_aux_t aux;
+
+	memset(&aux, 0, sizeof(ktp_aux_t));
+	aux.opt = opt = mem_opt_init();
+	while ((c = getopt(argc, argv, "k:r:y:c:s:t:K:v:1")) >= 0) {
+		// Seeding options
+		if (c == 'k') opt->min_seed_len = (int)strtol(optarg, NULL, 10);
+		else if (c == 'r') opt->split_factor = strtof(optarg, NULL);
+		else if (c == 'y') opt->max_mem_intv = strtol(optarg, NULL, 10);
+		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
+		else if (c == 's') opt->split_width = (int)strtol(optarg, NULL, 10);
+		// Common options
+		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
+		else if (c == 'K') fixed_chunk_size = (int)strtol(optarg, NULL, 10);
+		else if (c == 'v') bwa_verbose = (int)strtol(optarg, NULL, 10);
+		else if (c == '1') no_mt_io = 1;
+		else return 1;
+	}
+
+	if (optind + 1 >= argc || optind + 3 < argc) {
+		free(opt);
 		return 1;
 	}
-	gzFile fp = gzdopen(fd, "r");
-	kseq_t *ks = kseq_init(fp);
-	int actual_chunk_size = 10 * 1000 * 1000;
-	int n_seqs;
-	mem_opt_t *opt = mem_opt_init();
-	bseq1_t *seqs = bseq_read(actual_chunk_size, &n_seqs, ks, NULL);
 
-	zip_process_seqs(opt, idx->bwt, idx->bns, idx->pac, 0, n_seqs, seqs);
+	aux.idx = bwa_idx_load_from_shm(argv[optind]);
+	if (aux.idx == 0) {
+		if ((aux.idx = bwa_idx_load(argv[optind], BWA_IDX_ALL)) == 0) return 1;
+	} else if (bwa_verbose >= 3)
+		fprintf(stderr, "[M::%s] load the bwa index from shared memory\n", __func__);
 
-	int i;
-	for (i = 0; i < n_seqs; i++) {
-		fprintf(stdout, "%s", seqs[i].sam);
+	ko = kopen(argv[optind + 1], &fd);
+	if (ko == 0) {
+		if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
+		return 1;
 	}
-	bwa_idx_destroy(idx);
-	kseq_destroy(ks);
-	err_gzclose(fp);
-	kclose(ko);
+	fp = gzdopen(fd, "r");
+	aux.ks = kseq_init(fp);
+	if (optind + 2 < argc) {
+		ko2 = kopen(argv[optind + 2], &fd2);
+		if (ko2 == 0) {
+			if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 2]);
+			return 1;
+		}
+		fp2 = gzdopen(fd2, "r");
+		aux.ks2 = kseq_init(fp2);
+		opt->flag |= MEM_F_PE;
+	}
+	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
+
+	memset(&zmp, 0, sizeof(zmp));
+	kt_pipeline(no_mt_io? 1 : 2, tp_seeding, &aux, 3);
+	zsmem_prof_output(&zmp);
+
+	free(opt);
+	bwa_idx_destroy(aux.idx);
+	kseq_destroy(aux.ks);
+	err_gzclose(fp); kclose(ko);
+	if (aux.ks2) {
+		kseq_destroy(aux.ks2);
+		err_gzclose(fp2); kclose(ko2);
+	}
 	return 0;
 }
