@@ -16,33 +16,10 @@ extern zsmem_prof_t zmp;
 
 typedef kvec_t(int) int_v;
 
-typedef struct {
-	bwtintv_v mem, mem1, *tmpv[2];
-} smem_aux_t;
-
-static smem_aux_t *smem_aux_init()
-{
-	smem_aux_t *a;
-	a = calloc(1, sizeof(smem_aux_t));
-	a->tmpv[0] = calloc(1, sizeof(bwtintv_v));
-	a->tmpv[1] = calloc(1, sizeof(bwtintv_v));
-	return a;
-}
-
-static void smem_aux_destroy(smem_aux_t *a)
-{
-	free(a->tmpv[0]->a); free(a->tmpv[0]);
-	free(a->tmpv[1]->a); free(a->tmpv[1]);
-	free(a->mem.a); free(a->mem1.a);
-	free(a);
-}
-
 static inline int intv_len(bwtintv_t *p) {
 	return (int)p->info - (p->info>>32);
 }
 typedef kvec_t(mem_seed_t) mem_seed_v;
-
-
 
 cs_aux_t* cs_aux_init(int n, const bseq1_t *reads) {
 	cs_aux_t *a;
@@ -82,7 +59,7 @@ typedef struct {
 	const bwt_t *bwt;
 	int n;
 	bseq1_t *seqs;
-	smem_aux_t **smem_aux;
+	smem_aux_t **mem_aux;
 	cs_aux_t *cs_aux;
 	con_seq_v csv;
 	mem_seed_v *seq_seeds; // seeds temporary buffer.
@@ -250,102 +227,47 @@ con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *au
 	return csv;
 }
 
-static void em2seeds(const bwt_t *bwt, bwtintv_t *p, int max_occ, mem_seed_v *seeds) {
-	int step, count, slen = intv_len(p);
-	int64_t k;
-	step = p->x[2] > max_occ? p->x[2] / max_occ : 1;
-	for(k = count = 0; k < p->x[2] && count < max_occ; k += step, ++count) {
-		mem_seed_t tmp;
-		tmp.rbeg = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
-		tmp.len = slen;
-		tmp.score = slen;
-		tmp.qbeg = (int)(p->info>>32);
-		kv_push(mem_seed_t, *seeds, tmp);
+// Look up SA for occurrence location on reference of MEMs.
+static void mem_sal(const mem_opt_t  *opt, const bwt_t *bwt, const bwtintv_v *mems, uint8_t *seeds) {
+	int i;
+	long pointer = 0;
+	*(int*)(seeds + pointer) = mems->n; pointer += sizeof(int);
+	for (i = 0; i < mems->n; ++i) {
+		bwtintv_t *p = &mems->a[i];
+		int count, slen = (uint32_t)p->info - (p->info>>32); // seed length
+		*(int*)(seeds + pointer) = p->info>>32; pointer += sizeof(int);
+		*(int*)(seeds + pointer) = slen; pointer += sizeof(int);
+		*(long*)(seeds + pointer) = p->x[2]; pointer += sizeof(long);
+		int64_t k, step;
+		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
+		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
+			int64_t rb = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
+			*(long*)(seeds + pointer) = rb; pointer += sizeof(long);
+		}
 	}
 }
 
-// Sort seeds by [qb, qe, rb]
-#define mem_seed_lt_step2(a, b) ((a).len != (b).len ?(a).len < (b).len :(a).rbeg < (b).rbeg)
-#define mem_seed_lt(a, b) ((a).qbeg != (b).qbeg ?(a).qbeg < (b).qbeg :mem_seed_lt_step2((a), (b)))
-KSORT_INIT(mem_seeds, mem_seed_t, mem_seed_lt)
+static void cs_seeding_worker(void *data, long cs_id, int t_id) {
+	worker_t *w = (worker_t*)data;
+	con_seq_t *cs = &w->csv.a[cs_id];
+	const bwt_t *bwt = w->bwt;
+	const mem_opt_t *opt = w->opt;
+	smem_aux_t *aux = w->mem_aux[t_id];
 
-// Sort EMs by [qb, qe]
-#define intv_lt(a, b) ((a).info < (b).info)
-KSORT_INIT(mez_intv, bwtintv_t, intv_lt)
+	// BWA-MEM seeding on CS.
+	mem_collect_intv(opt, bwt, cs->n, cs->s, aux);
 
-//static void cs_seeding(void *data, long cs_id, int t_id) {
-//
-//	worker_t *w = (worker_t*)data;
-//	con_seq_t *b = &w->csv.a[cs_id];
-//	cs_aux_t *cs = w->cs_aux[t_id];
-//	const bwt_t *bwt = w->bwt;
-//	const mem_opt_t *opt = w->opt;
-//	smem_aux_t *a = w->mem_aux[t_id];
-//
-//	int i, j;
-//	b->n = 0;
-//	for(i = b->l; i < b->r; ++i) {
-//		w->cs_id[i] = cs_id;
-//		w->dis[i] = (i == b->l) ?0 :(w->dis[i-1] + w->dis[i]);
-//		b->n = (w->dis[i] + w->seqs[i].l_seq > b->n) ?(w->dis[i] + w->seqs[i].l_seq) :b->n;
-//	}
-//
-//	/* Majority rule: voting for Consensus Sequence */
-//	b->s = malloc(b->n * sizeof(uint8_t));
-//	if(b->n > cs->m) {
-//		cs->m = b->n << 1;
-//		for(i = 0; i < 4; ++i) {
-//			cs->cnt[i] = realloc(cs->cnt[i], cs->m * sizeof(int));
-//		}
-//	}
-//	for(i = 0; i < 4; ++i) {
-//		memset(cs->cnt[i], 0, b->n * sizeof(int));
-//	}
-//	for(i = b->l; i < b->r; ++i) {
-//		char *seq = w->seqs[i].seq;
-//		for(j = 0; j < w->seqs[i].l_seq; ++j) {
-//			int pos = w->dis[i] + j;
-//			assert(pos < b->n);
-//			if(seq[j] > 3) continue;
-//			++cs->cnt[(int)seq[j]][pos];
-//		}
-//	}
-//	for(i = 0; i < 4; i++) {
-//		b->cnt[i] = malloc(b->n * sizeof(int));
-//	}
-//	for(i = 0; i < b->n; ++i) {
-//		int max = -1, max_id = 0;
-//		for(j = 0; j < 4; ++j) {
-//			b->cnt[j][i] = cs->cnt[j][i];
-//			if(cs->cnt[j][i] > max) {
-//				max = cs->cnt[j][i];
-//				max_id = j;
-//			}
-//		}
-//		b->s[i] = (uint8_t)max_id;
-//	}
-//
-//	/* LAST-like */
-//	a->mem.n = 0;
-//	if(opt->max_mem_intv > 0) {
-//		int x = 0;
-//		while(x < b->n) {
-//			bwtintv_t m;
-//			x = bwt_seed_strategy1(bwt, b->n, b->s, x, opt->min_seed_len, opt->max_mem_intv, &m);
-//			if (m.x[2] > 0) {
-//				kv_push(bwtintv_t, a->mem, m);
-//			}
-//		}
-//	}
-//
-//	/* SAL */
-//	mem_seed_v *seeds = &b->shared_seeds; kv_init(*seeds);
-//	for(i = 0; i < a->mem.n; ++i) {
-//		bwtintv_t *p = &a->mem.a[i];
-//		// append seeds of p to $seeds
-//		em2seeds(w->bwt, p, opt->max_occ, seeds);
-//	}
-//}
+	/* Allocating memory for CS seeds */
+	int i;
+	long bytes_n = sizeof(int), pointer = 0;
+	for (i = 0; i < aux->mem.n; i++) { // Seed cluster
+		bytes_n += sizeof(int) + sizeof(int) + sizeof(long); // qb, l, SA size,
+		const bwtintv_t *p = &aux->mem.a[i];
+		bytes_n += sizeof(long) * (p->x[2] > opt->max_occ ? opt->max_occ : p->x[2]); // Occurrence locations
+	}
+	cs->seeds = malloc(bytes_n);
+	mem_sal(opt, bwt, &aux->mem, cs->seeds);
+}
 
 //static void mez_worker1(void *data, long seq_id, int t_id) {
 //	worker_t *w = (worker_t*)data;
@@ -512,7 +434,7 @@ KSORT_INIT(mez_intv, bwtintv_t, intv_lt)
 void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
 	worker_t w;
 	double ctime, rtime;
-	int i, j;
+	int i;
 
 	ctime = cputime(); rtime = realtime();
 	w.opt = opt;
@@ -526,19 +448,17 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 	double gencs_c = cputime(), gencs_r = realtime();
 	zmp.t_gencs[0] += gencs_c - ctime; zmp.t_gencs[1] += gencs_r - rtime;
 
+	/* Seeding on Consensus Sequences */
+	w.mem_aux = malloc(opt->n_threads * sizeof(smem_aux_t*));
+	for (i = 0; i < opt->n_threads; i++) w.mem_aux[i] = smem_aux_init();
+	kt_for(opt->n_threads, cs_seeding_worker, &w, w.csv.n);
+	for (i = 0; i < w.csv.n; i++) free(w.csv.a[i].seeds);
 	cs_aux_destroy(w.cs_aux);
 	free(w.csv.a);
+	for (i = 0; i < opt->n_threads; i++) { smem_aux_destroy(w.mem_aux[i]); } free(w.mem_aux);
+	double csseed_c = cputime(), csseed_r = realtime();
+	zmp.t_csseed[0] += csseed_c - gencs_c; zmp.t_csseed[1] += csseed_r - gencs_r;
 
-	return ;
-
-//	/* Seeding on Consensus Sequences */
-//	w.mem_aux = malloc(opt->n_threads * sizeof(smem_aux_t*));
-//	for (i = 0; i < opt->n_threads; i++) w.mem_aux[i] = smem_aux_init();
-//	w.cs_id = malloc(n * sizeof(int)); memset(w.cs_id, -1, n * sizeof(int));
-//	kt_for(opt->n_threads, cs_seeding, &w, (int) w.csv.n);
-//	double csseed_c = cputime(), csseed_r = realtime();
-//	zmp.t_csseed[0] += csseed_c - gencs_c; zmp.t_csseed[1] += csseed_r - gencs_r;
-//
 //	/* Reusing and supplementary seeding (process singletons) */
 //	w.misbuf = calloc(opt->n_threads, sizeof(int_v));
 //	w.seedmis = calloc(opt->n_threads, sizeof(int_v));
@@ -547,15 +467,7 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 //	kt_for(opt->n_threads, mez_worker1, &w, (opt->flag & MEM_F_PE) ? n >> 1 : n); // find mapping positions
 //
 //	// Temp memory free
-//	for (i = 0; i < w.csv.n; i++)  {
-//		const con_seq_t *p = &w.csv.a[i];
-//		free(p->s);
-//		free(p->cnt[0]); free(p->cnt[1]); free(p->cnt[2]); free(p->cnt[3]);
-//	}
-//	free(w.csv.a);
-//	for (i = 0; i < opt->n_threads; i++) { smem_aux_destroy(w.mem_aux[i]); } free(w.mem_aux);
 //	for (i = 0; i < opt->n_threads; i++) { free(w.misbuf[i].a); } free(w.misbuf);
 //	for (i = 0; i < opt->n_threads; i++) { free(w.seedmis[i].a); } free(w.seedmis);
 //	for (i = 0; i < opt->n_threads; i++) { free(w.seq_seeds[i].a); }  free(w.seq_seeds);
-
 }

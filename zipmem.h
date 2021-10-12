@@ -11,6 +11,7 @@ typedef struct {
 	int n; // consensus sequence length
 	uint8_t *s; // consensus sequence
 	int *cnt[4]; // Saving votes.
+	uint8_t *seeds; // CS seeds
 } con_seq_t;
 
 typedef struct {
