@@ -85,6 +85,10 @@ typedef struct {
 } mem_opt_t;
 
 typedef struct {
+	bwtintv_v mem, mem1, *tmpv[2];
+} smem_aux_t;
+
+typedef struct {
 	int64_t rbeg;
 	int32_t qbeg, len;
 	int score;
@@ -145,6 +149,15 @@ extern "C" {
 #endif
 
 	mem_opt_t *mem_opt_init(void);
+
+	/**
+	 * Collect Maximal Exact Matches (MEMs) on query read.
+	 * Return SA interval of sorted MEMs stored in $a.
+	 */
+	smem_aux_t *smem_aux_init();
+	void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a);
+//	void ks_introsort(mem_intv, size_t n, bwtintv_t *a);
+	void smem_aux_destroy(smem_aux_t *a);
 
 	/**
 	 * Seeding for a batch of sequences

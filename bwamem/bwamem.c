@@ -117,11 +117,7 @@ mem_opt_t *mem_opt_init()
 #define intv_lt(a, b) ((a).info < (b).info)
 KSORT_INIT(mem_intv, bwtintv_t, intv_lt)
 
-typedef struct {
-	bwtintv_v mem, mem1, *tmpv[2];
-} smem_aux_t;
-
-static smem_aux_t *smem_aux_init()
+smem_aux_t *smem_aux_init()
 {
 	smem_aux_t *a;
 	a = calloc(1, sizeof(smem_aux_t));
@@ -130,7 +126,7 @@ static smem_aux_t *smem_aux_init()
 	return a;
 }
 
-static void smem_aux_destroy(smem_aux_t *a)
+void smem_aux_destroy(smem_aux_t *a)
 {	
 	free(a->tmpv[0]->a); free(a->tmpv[0]);
 	free(a->tmpv[1]->a); free(a->tmpv[1]);
@@ -138,7 +134,7 @@ static void smem_aux_destroy(smem_aux_t *a)
 	free(a);
 }
 
-static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a)
+void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a)
 {
 	int i, k, x = 0, old_n;
 	int start_width = 1;
@@ -1162,7 +1158,7 @@ static void seeding_worker(void *data, long seq_id, int tid) {
 	long bytes_n = sizeof(long) + sizeof(int), pointer = 0;
 	for (i = 0; i < aux->mem.n; i++) { // Seed cluster
 		bytes_n += sizeof(int) + sizeof(int) + sizeof(long); // qb, l, SA size,
-		bwtintv_t *p = &aux->mem.a[i];
+		const bwtintv_t *p = &aux->mem.a[i];
 		bytes_n += sizeof(long) * (p->x[2] > opt->max_occ ? opt->max_occ : p->x[2]); // Occurrence locations
 	}
 	read->sam = malloc(bytes_n);
@@ -1170,11 +1166,11 @@ static void seeding_worker(void *data, long seq_id, int tid) {
 	*(int*)(read->sam + pointer) = aux->mem.n; pointer += sizeof(int);
 	for (i = 0; i < aux->mem.n; ++i) {
 		bwtintv_t *p = &aux->mem.a[i];
-		int step, count, slen = (uint32_t)p->info - (p->info>>32); // seed length
+		int count, slen = (uint32_t)p->info - (p->info>>32); // seed length
 		*(int*)(read->sam + pointer) = p->info>>32; pointer += sizeof(int);
 		*(int*)(read->sam + pointer) = slen; pointer += sizeof(int);
 		*(long*)(read->sam + pointer) = p->x[2]; pointer += sizeof(long);
-		int64_t k;
+		int64_t k, step;
 		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
 		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
 			int64_t rb = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
