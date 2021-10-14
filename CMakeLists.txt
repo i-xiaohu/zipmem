@@ -3,7 +3,7 @@ project(zip_seeding C)
 
 set(CMAKE_C_STANDARD 99)
 set(exe zipmem)
-add_compile_options(-O2)
+add_compile_options(-g -O2)
 
 set(cstl
         cstl/kbtree.h
@@ -56,3 +56,9 @@ add_executable(${exe}
         zipmem.h
         main.c)
 target_link_libraries(${exe} -lm -lz -lpthread -lrt)
+
+add_executable(check
+        ${bwalib}
+        ${FM_index}
+        check_seed.c)
+target_link_libraries(check -lz -lrt)
