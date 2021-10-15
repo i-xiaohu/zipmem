@@ -253,8 +253,7 @@ void mem_print_chain(const bntseq_t *bns, mem_chain_v *chn)
 	}
 }
 
-FILE *chainf = NULL;
-mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, int len, const uint8_t *seq, const uint8_t *seeds)
+mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int len, const uint8_t *seq, const uint8_t *seeds)
 {
 	int i, j, b, e, l_rep;
 	int64_t l_pac = bns->l_pac;
@@ -281,11 +280,12 @@ mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 
 	// Chaining
 	pointer = sizeof(int);
-	for (i = 0; i < mem_n; ++i) {
+	for (i = 0; i < mem_n; i++) {
 		int qb = *(int*)(seeds + pointer); pointer += sizeof(int);
 		int slen = *(int*)(seeds + pointer); pointer += sizeof(int);
 		long sa_size = *(long*)(seeds + pointer); pointer += sizeof(long);
 		int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
+		int seed_score = INT32_MIN; // Mismatches number in the $mem.
 		for (j = 0; j < true_occ; j++) {
 			mem_chain_t tmp, *lower, *upper;
 			mem_seed_t s;
@@ -293,9 +293,23 @@ mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 			// this is the base coordinate in the forward-reverse reference
 			s.rbeg = tmp.pos = *(long*)(seeds + pointer); pointer += sizeof(long);
 			s.qbeg = qb;
-			s.score= s.len = slen;
+			s.len  = slen;
 			rid = bns_intv2rid(bns, s.rbeg, s.rbeg + s.len);
 			if (rid < 0) continue; // bridging multiple reference sequences or the forward-reverse boundary
+			if (seed_score == INT32_MIN) {
+				int64_t get_len = 0;
+				uint8_t *ref = bns_get_seq(l_pac, pac, s.rbeg, s.rbeg + s.len, &get_len);
+				assert(get_len == s.len);
+				seed_score = slen * opt->a;
+				int k;
+				for (k = 0; k < s.len; k++) {
+					if (seq[s.qbeg + k] > 3) seed_score -= 1;
+					else if (seq[s.qbeg + k] != ref[k]) seed_score -= opt->b;
+				}
+				free(ref);
+			}
+			s.score = seed_score;
+			if (s.score < opt->min_seed_len * opt->a) continue; // The seed contains too many mismatches
 			if (kb_size(tree)) {
 				kb_intervalp(chn, tree, &tmp, &lower, &upper); // find the closest chain
 				if (!lower || !test_and_merge(opt, l_pac, lower, &s, rid)) to_add = 1;
@@ -738,7 +752,7 @@ void mem_chain2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac
 					printf("*** Left ref:   "); for (j = 0; j < tmp; ++j) putchar("ACGTN"[(int)rs[j]]); putchar('\n');
 					printf("*** Left query: "); for (j = 0; j < s->qbeg; ++j) putchar("ACGTN"[(int)qs[j]]); putchar('\n');
 				}
-				a->score = ksw_extend2(s->qbeg, qs, tmp, rs, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, aw[0], opt->pen_clip5, opt->zdrop, s->len * opt->a, &qle, &tle, &gtle, &gscore, &max_off[0]);
+				a->score = ksw_extend2(s->qbeg, qs, tmp, rs, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, aw[0], opt->pen_clip5, opt->zdrop, s->score, &qle, &tle, &gtle, &gscore, &max_off[0]);
 				if (bwa_verbose >= 4) { printf("*** Left extension: prev_score=%d; score=%d; bandwidth=%d; max_off_diagonal_dist=%d\n", prev, a->score, aw[0], max_off[0]); fflush(stdout); }
 				if (a->score == prev || max_off[0] < (aw[0]>>1) + (aw[0]>>2)) break;
 			}
@@ -751,7 +765,7 @@ void mem_chain2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac
 				a->truesc = gscore;
 			}
 			free(qs); free(rs);
-		} else a->score = a->truesc = s->len * opt->a, a->qb = 0, a->rb = s->rbeg;
+		} else a->score = a->truesc = s->score, a->qb = 0, a->rb = s->rbeg;
 
 		if (s->qbeg + s->len != l_query) { // right extension
 			int qle, tle, qe, re, gtle, gscore, sc0 = a->score;
@@ -1210,7 +1224,7 @@ static void extend_worker1(void *data, long seq_id, int t_id) {
 		read->seq[i] = read->seq[i] < 4 ?read->seq[i] :nst_nt4_table[(int)read->seq[i]];
 	}
 
-	mem_chain_v chn = mem_chain(opt, bwt, bns, read->l_seq, (uint8_t*)read->seq, seeds);
+	mem_chain_v chn = mem_chain(opt, bwt, bns, pac, read->l_seq, (uint8_t*)read->seq, seeds);
 	free(seeds);
 	chn.n = mem_chain_flt(opt, chn.n, chn.a);
 	if (bwa_verbose >= 4) mem_print_chain(bns, &chn);
@@ -1264,9 +1278,7 @@ void mem_extend(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, con
 	w.seeds = seeds; w.seqs = seqs;
 	w.n_processed = n_processed;
 	w.pes = &pes[0];
-	chainf = fopen("/vol1/agis/ruanjue_group/jifahu/zsmem-experiments/zipmem/zipmem.chains", "w");
 	kt_for(opt->n_threads, extend_worker1, &w, n);
-	fclose(chainf);
 	free(seeds);
 	if (opt->flag&MEM_F_PE) { // infer insert sizes if not provided
 		if (pes0) memcpy(pes, pes0, 4 * sizeof(mem_pestat_t)); // if pes0 != NULL, set the insert-size distribution as pes0
