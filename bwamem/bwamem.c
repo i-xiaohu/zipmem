@@ -300,11 +300,12 @@ mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 				int64_t get_len = 0;
 				uint8_t *ref = bns_get_seq(l_pac, pac, s.rbeg, s.rbeg + s.len, &get_len);
 				assert(get_len == s.len);
-				seed_score = slen * opt->a;
+				seed_score = 0;
 				int k;
 				for (k = 0; k < s.len; k++) {
 					if (seq[s.qbeg + k] > 3) seed_score -= 1;
 					else if (seq[s.qbeg + k] != ref[k]) seed_score -= opt->b;
+					else seed_score += opt->a;
 				}
 				free(ref);
 			}
