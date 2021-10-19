@@ -27,6 +27,8 @@
 #ifndef BWAMEM_H_
 #define BWAMEM_H_
 
+#include <string.h>
+
 #include "../cstl/kstring.h"
 #include "../FM_index//bwt.h"
 #include "../FM_index/bntseq.h"
@@ -156,7 +158,7 @@ extern "C" {
 	 */
 	smem_aux_t *smem_aux_init();
 	void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a);
-//	void ks_introsort(mem_intv, size_t n, bwtintv_t *a);
+	void ks_introsort_mem_intv(size_t n, bwtintv_t *a);
 	void smem_aux_destroy(smem_aux_t *a);
 
 	/**

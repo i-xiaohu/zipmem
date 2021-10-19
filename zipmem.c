@@ -16,11 +16,6 @@ extern zsmem_prof_t zmp;
 
 typedef kvec_t(int) int_v;
 
-static inline int intv_len(bwtintv_t *p) {
-	return (int)p->info - (p->info>>32);
-}
-typedef kvec_t(mem_seed_t) mem_seed_v;
-
 cs_aux_t* cs_aux_init(int n, const bseq1_t *reads) {
 	cs_aux_t *a;
 	a = calloc(1, sizeof(cs_aux_t));
@@ -266,6 +261,10 @@ static void cs_seeding_worker(void *data, long cs_id, int t_id) {
 	cs->seeds = mem_sal(opt, bwt, &aux->mem);
 }
 
+static inline int intv_len(const bwtintv_t *p) {
+	return (int)p->info - (p->info>>32);
+}
+
 static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	worker_t *w = (worker_t*)data;
 	const bwt_t *bwt = w->bwt;
@@ -273,38 +272,14 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	const mem_opt_t *opt = w->opt;
 	bseq1_t *read = &w->seqs[seq_id];
 	int i, j, len = read->l_seq;
-	uint8_t *bases = (uint8_t*)read->seq;
 	int cs_id = w->cs_aux->belong_to[seq_id];
-	assert(cs_id < w->csv.n);
 	int cs_os = w->cs_aux->offset[seq_id];
 	const con_seq_t *cs = &w->csv.a[cs_id];
-	assert(cs_os + len <= cs->n);
-
 	uint8_t is_rc = w->cs_aux->is_rc[seq_id];
-	if (is_rc) reverse_complement(len, bases);
-
-//	smem_aux_t *a = w->mem_aux[t_id];
-	int_v *misbuf = &w->misbuf[t_id]; misbuf->n = 0;
-	for (i = 0; i < len; i++) {
-		if (bases[i] > 3) continue;
-		if (cs->s[cs_os + i] != bases[i]) kv_push(int, *misbuf, i);
-	}
-	zmp.mis_n[t_id] += misbuf->n;
 
 	// Reusing preparation
 	long pointer = 0, bytes_n = 0;
 	int csmem_n = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
-	int last_qb = -1;
-	for (i = 0; i < csmem_n; i++) {
-		int sb = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
-		int se = sb + *(int*)(cs->seeds + pointer); pointer += sizeof(int);
-		long sa_size = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
-		pointer += ((sa_size < opt->max_occ) ?sa_size :opt->max_occ) * sizeof(long);
-		assert(sb >= last_qb);
-		last_qb = sb;
-	}
-	pointer = sizeof(int);
-
 	for (i = 0; i < csmem_n; i++) {
 		long mem_beg = pointer;
 		int sb = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
@@ -318,10 +293,8 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	}
 
 	long p2 = 0;
-	int reused_mem = 0;
-	read->sam = malloc(bytes_n * sizeof(uint8_t) + sizeof(long) + sizeof(int));
-	p2 += sizeof(long); // Skip the reused mem bytes
-	p2 += sizeof(int); // Skip the reused mem number
+	uint8_t *reused_mem = malloc(bytes_n * sizeof(uint8_t));
+	int reused_n = 0;
 	if (bytes_n > 0) {
 		// Reusing CS seeds
 		pointer = sizeof(int);
@@ -341,146 +314,127 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 				continue;
 			}
 			down_sb = is_rc ?len-down_sb-down_l :down_sb;
-			reused_mem++;
-			zmp.reused_n[t_id] += sa_size;
-			*(int*)(read->sam + p2) = down_sb; p2 += sizeof(int);
-			*(int*)(read->sam + p2) = down_l; p2 += sizeof(int);
-			*(long*)(read->sam + p2) = sa_size; p2 += sizeof(long);
+			reused_n++;
+			zmp.reused_n[t_id] += true_occ;
+			*(int*)(reused_mem + p2) = down_sb; p2 += sizeof(int);
+			*(int*)(reused_mem + p2) = down_l; p2 += sizeof(int);
+			*(long*)(reused_mem + p2) = sa_size; p2 += sizeof(long);
 			for (j = 0; j < true_occ; j++) {
 				long loc = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
 				loc += l_clip;
 				loc = is_rc ?bwt->seq_len-loc-down_l :loc;
-				*(long*)(read->sam + p2) = loc;  p2 += sizeof(long);
+				*(long*)(reused_mem + p2) = loc; p2 += sizeof(long);
 			}
 		}
 	}
-	*(long*)read->sam = p2 - sizeof(long);
-	*(int*)(read->sam + sizeof(long)) = reused_mem;
+	long reused_bytes = p2;
 
+	// Supplementary seeding
+	uint8_t *bases = (uint8_t*)read->seq;
+	if (is_rc) reverse_complement(len, bases);
 
+	smem_aux_t *a = w->mem_aux[t_id]; a->mem.n = 0;
+	int_v *misbuf = &w->misbuf[t_id]; misbuf->n = 0;
+	for (i = 0; i < len; i++) {
+		if (bases[i] > 3) continue;
+		if (cs->s[cs_os + i] != bases[i]) {
+			kv_push(int, *misbuf, i);
+		}
+	}
+	zmp.mis_n[t_id] += misbuf->n;
+	int last_mem_end = -1;
+	for (i = 0; i < misbuf->n; i++) {
+		int x = misbuf->a[i];
+		if (x < last_mem_end) continue; // Skip the mismatch contained by previous mem
+		last_mem_end = bwt_smem1(bwt, len, bases, x, 1, &a->mem1, a->tmpv);
+		for (j = 0; j < a->mem1.n; j++) {
+			const bwtintv_t *p = &a->mem1.a[j];
+			if (intv_len(p) >= opt->min_seed_len) {
+				kv_push(bwtintv_t, a->mem, *p);
+			}
+		}
+	}
 
-//	/* 1. Seeding */
-//	int x, j, start_width = 1;
-//	int can_reuse = 1; // can reuse then zip-seeding, otherwise throw it into BWA-MEM seeding.
-//	misbuf->n = 0;
-//	a->mem.n = 0;
-//
-//	const con_seq_t *b = &w->csv.a[cs_id];
-//
-//	/* Seeding */
-//	if(!can_reuse) {
-//		x = 0;
-//		while (x < len) {
-//			if (bases[x] < 4) {
-//				x = bwt_smem1(bwt, len, bases, x, start_width, &a->mem1, a->tmpv);
-//				for (i = 0; i < a->mem1.n; ++i) {
-//					bwtintv_t *p = &a->mem1.a[i];
-//					if (intv_len(p) >= opt->min_seed_len) {
-//						kv_push(bwtintv_t, a->mem, *p);
-//					}
-//				}
-//			} else ++x;
-//		}
-//	} else {
-//		/* Reads in CS and not be kicked off, seeding on each mismatched position */
-//		const con_seq_t *b = &w->csv.a[cs_id];
-//		int last_x = -1;
-//		for(i = 0; i < misbuf->n; ++i) {
-//			int mis = misbuf->a[i];
-//			if(mis < last_x) continue; // This mismatch has been covered by previous EMs.
-//			if(bases[mis] > 3) continue; // Can't seeding on an ambiguous base N
-//			int sum = b->cnt[0][dis+mis] + b->cnt[1][dis+mis] + b->cnt[2][dis+mis] + b->cnt[3][dis+mis];
-//			if(b->cnt[bases[mis]][dis + mis] <= sum / 4) continue; // The mismatched base takes few percentage.
-//			last_x = bwt_smem1(bwt, len, bases, mis, start_width, &a->mem1, a->tmpv);
-//			for(j = 0; j < a->mem1.n; ++j) {
-//				bwtintv_t *p = &a->mem1.a[j];
-//				if(intv_len(p) >= opt->min_seed_len) {
-//					kv_push(bwtintv_t, a->mem, *p);
-//				}
-//			}
-//		}
-//	}
-//
-//	/* 2. Re-seeding */
-//	int old_n = (int)a->mem.n;
-//	int split_len = (int)(opt->min_seed_len * opt->split_factor + .499);
-//	for(i = 0; i < old_n; ++i) {
-//		bwtintv_t *p = &a->mem.a[i];
-//		int start = (int)(p->info>>32), end = (int32_t)p->info;
-//		if (end - start < split_len || p->x[2] > opt->split_width) continue;
-//		bwt_smem1(bwt, len, bases, (start + end) >> 1, p->x[2] + 1, &a->mem1, a->tmpv);
-//		for(j = 0; j < a->mem1.n; ++j) {
-//			if(intv_len(&a->mem1.a[j]) >= opt->min_seed_len) {
-//				kv_push(bwtintv_t, a->mem, a->mem1.a[j]);
-//			}
-//		}
-//	}
-//
-//	/* 3. LAST-like */
-//	if(can_reuse == 0 && opt->max_mem_intv > 0) {
-//		x = 0;
-//		while(x < len) {
-//			if(bases[x] < 4) {
-//				bwtintv_t m;
-//				x = bwt_seed_strategy1(bwt, len, bases, x, opt->min_seed_len, opt->max_mem_intv, &m);
-//				if(m.x[2] > 0) {
-//					kv_push(bwtintv_t, a->mem, m);
-//				}
-//			} else {
-//				++x;
-//			}
-//		}
-//	}
-//
-//	if(can_reuse == 0) {
-//		w->cs_id[seq_id] = -1; // Mark this for seeds sorting.
-//		ks_introsort(mez_intv, a->mem.n, a->mem.a);
-//	}
-//
-//	/* 4. SAL */
-//	mem_seed_v *seeds = &w->seq_seeds[t_id]; seeds->n = 0;
-//	for (i = 0; i < a->mem.n; ++i) {
-//		bwtintv_t *p = &a->mem.a[i];
-//		em2seeds(bwt, p, opt->max_occ, seeds);
-//	}
-//
-//	if(can_reuse == 0) {
-//		return ;
-//	}
-//
-//	/* 5. Reuse shared seeds in CS */
-//	const con_seq_t *b = &w->csv.a[cs_id];
-//	const mem_seed_v *ss = &b->shared_seeds;
-//	for(i = 0; i < ss->n; ++i) { // seeds with query-begin < dis + len
-//		mem_seed_t *s = &ss->a[i];
-//		if(s->qbeg >= dis + len || s->qbeg + s->len <= dis) { // has no intersection
-//			continue;
-//		}
-//		int start = s->qbeg - dis, end = s->qbeg + s->len - dis; // [start, end) had fall down query read
-//		int cut_l = (start > 0) ?start :0; // cut [start, end)
-//		int cut_r = (end < len) ?end :len;
-//		assert(cut_l < cut_r);
-//		if(cut_r - cut_l < opt->min_seed_len) continue;
-//		int_v *misv = &w->seedmis[t_id]; misv->n = 0;
-//		kv_push(int, *misv, cut_l - 1);
-//		for(j = 0; j < misbuf->n; ++j) {
-//			int mis = misbuf->a[j];
-//			if(mis >= cut_l && mis < cut_r) {
-//				kv_push(int, *misv, mis);
-//			}
-//		}
-//		kv_push(int, *misv, cut_r);
-//		for(j = 0; j < misv->n - 1; ++j) {
-//			int qb = misv->a[j] + 1, qe = misv->a[j+1]; // [qb, qe)
-//			if(qe - qb < opt->min_seed_len) continue;
-//			mem_seed_t rs;
-//			rs.rbeg = s->rbeg + (qb - start);
-//			rs.qbeg = qb;
-//			rs.len = qe - qb;
-//			rs.score = rs.len; // reused seeds didn't call em2seeds, so we need to assign score manually.
-//			kv_push(mem_seed_t, *seeds, rs);
-//		}
-//	}
+	/* 2. Re-seeding */
+	int old_n = (int)a->mem.n;
+	int split_len = (int)(opt->min_seed_len * opt->split_factor + .499);
+	for(i = 0; i < old_n; i++) {
+		const bwtintv_t *p = &a->mem.a[i];
+		int start = (int)(p->info>>32), end = (int32_t)p->info;
+		if (end - start < split_len || p->x[2] > opt->split_width) continue;
+		bwt_smem1(bwt, len, bases, (start + end) / 2, p->x[2] + 1, &a->mem1, a->tmpv);
+		for(j = 0; j < a->mem1.n; ++j) {
+			if(intv_len(&a->mem1.a[j]) >= opt->min_seed_len) {
+				kv_push(bwtintv_t, a->mem, a->mem1.a[j]);
+			}
+		}
+	}
+
+	// Preparing memory for supplementary seeds
+	long sup_bytes = 0;
+	for (i = 0; i < a->mem.n; i++) {
+		const bwtintv_t *p = &a->mem.a[i];
+		int true_occ = p->x[2] < opt->max_occ ?p->x[2] :opt->max_occ;
+		zmp.sup_n[t_id] += true_occ;
+		sup_bytes += sizeof(int) + sizeof(int) + sizeof(long) + true_occ * sizeof(long);
+	}
+
+	// Push the reused mems into sup mems array
+	p2 = 0;
+	for (i = 0; i < reused_n; i++) {
+		bwtintv_t temp;
+		temp.x[2] = 0; // Use x[2]=0 to mark reused mem
+		temp.x[0] = p2; // x[2] is used to record corresponding pointer
+		int sb = *(int*)(reused_mem + p2); p2 += sizeof(int);
+		int se = sb + *(int*)(reused_mem + p2); p2 += sizeof(int);
+		long sa_size = *(long*)(reused_mem + p2); p2 += sizeof(long);
+		int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
+		p2 += true_occ * sizeof(long);
+		temp.info = ((long)sb << 32) | se;
+		kv_push(bwtintv_t, a->mem, temp);
+	}
+
+	// Sort the sup and reused mems together
+	ks_introsort_mem_intv(a->mem.n, a->mem.a);
+
+	long total_bytes = sizeof(long) + sizeof(int) + sup_bytes + reused_bytes;
+	read->sam = malloc(total_bytes);
+	long p3 = 0;
+	p3 += sizeof(long); // Skip #bytes
+	p3 += sizeof(int); // Skip #mems
+	for (i = 0; i < a->mem.n; i++) {
+		const bwtintv_t *p = &a->mem.a[i];
+		if (p->x[2] == 0) {
+			p2 = p->x[0];
+			int sb = *(int*)(reused_mem + p2); p2 += sizeof(int);
+			int se = sb + *(int*)(reused_mem + p2); p2 += sizeof(int);
+			long sa_size = *(long*)(reused_mem + p2);
+			int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
+			long move_bytes = sizeof(int) + sizeof(int) + sizeof(long) + sizeof(long) * true_occ;
+			memcpy(read->sam + p3, reused_mem + p->x[0], move_bytes);
+			p3 += move_bytes;
+			assert(sb == p->info >> 32);
+			assert(se == (int)p->info);
+		} else {
+			int count, qb = p->info>>32;
+			int slen = (uint32_t)p->info - qb;
+			qb = is_rc ?len-qb-slen :qb;
+			*(int*)(read->sam + p3) = qb; p3 += sizeof(int);
+			*(int*)(read->sam + p3) = slen; p3 += sizeof(int);
+			*(long*)(read->sam + p3) = p->x[2]; p3 += sizeof(long);
+			int64_t k, step;
+			step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
+			for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
+				int64_t rb = bwt_sa(bwt, p->x[0] + k);
+				rb = is_rc ?bwt->seq_len-rb-slen :rb;
+				*(long*)(read->sam + p3) = rb; p3 += sizeof(long);
+			}
+		}
+	}
+	*(long*)read->sam = total_bytes - sizeof(long);
+	*(int*)(read->sam + sizeof(long)) = a->mem.n;
+	assert(p3 == total_bytes);
+	free(reused_mem);
 }
 
 void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
