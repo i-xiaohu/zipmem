@@ -182,6 +182,7 @@ static void gen_cs_worker(void *data, long c_id, int t_id) {
 }
 
 con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *aux) {
+	double ctime_s = cputime(), rtime_s = realtime();
 	cs_worker_t w;
 	w.chunks_n = threads_n; // Split the reads set into $threads_n uniform chunks
 	w.n = n;
@@ -189,8 +190,11 @@ con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *au
 	w.aux = aux;
 	w.chunk_csv = calloc(w.chunks_n, sizeof(con_seq_v));
 	kt_for(threads_n, gen_cs_worker, &w, w.chunks_n);
+	double ctime_e = cputime(), rtime_e = realtime();
+	zmp.assemble[0] += ctime_e - ctime_s; zmp.assemble[1] += rtime_e - rtime_s;
 
 	// Sum up CS of all chunks
+	ctime_s = cputime(); rtime_s = realtime();
 	con_seq_v csv; kv_init(csv);
 	int i, j;
 	for(i = 0; i < w.chunks_n; i++) {
@@ -206,6 +210,8 @@ con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *au
 		}
 		free(p->a);
 	}
+	ctime_e = cputime(); rtime_e = realtime();
+	zmp.sumup[0] += ctime_e - ctime_s; zmp.sumup[1] += rtime_e - rtime_s;
 
 	do {
 		zmp.reads_n += n;
@@ -450,6 +456,9 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 
 	/* Get consensus sequences, parallel process each chunk */
 	w.cs_aux = cs_aux_init(n, seqs);
+	double ctime_e = cputime(), rtime_e = realtime();
+	zmp.allocate[0] += ctime_e - ctime; zmp.allocate[1] += rtime_e - rtime;
+
 	w.csv = connect_reads_to_cs(opt->n_threads, n, seqs, w.cs_aux);
 	double gencs_c = cputime(), gencs_r = realtime();
 	zmp.t_gencs[0] += gencs_c - ctime; zmp.t_gencs[1] += gencs_r - rtime;
