@@ -30,12 +30,10 @@ static void zsmem_prof_output(zsmem_prof_t *a) {
 	for (i = 1; i < 256; i++) a->reused_n[0] += a->reused_n[i];
 	for (i = 1; i < 256; i++) a->sup_n[0] += a->sup_n[i];
 
-	fprintf(stderr, "Input_time  \t%.1f\t%.1f\t%.1fX\n",
-		 a->input[0], a->input[1], a->input[0]/a->input[1]);
+	fprintf(stderr, "Input_time  \t%.1f\n", a->input[1]);
 	fprintf(stderr, "Process_time\t%.1f\t%.1f\t%.1fX\n",
 		 a->process[0], a->process[1], a->process[0]/a->process[1]);
-	fprintf(stderr, "output_time \t%.1f\t%.1f\t%.1fX\n",
-		 a->output[0], a->output[1], a->output[0]/a->output[1]);
+	fprintf(stderr, "output_time \t%.1f\n", a->output[1]);
 	fprintf(stderr, "gencs_time  \t%.1f\t%.1f\t%.1fX\n",
 		 a->t_gencs[0], a->t_gencs[1], a->t_gencs[0]/a->t_gencs[1]);
 	fprintf(stderr, "  Allocating\t%.1f\t%.1f\n", a->allocate[0], a->allocate[1]);

@@ -13,7 +13,7 @@ zsmem_prof_t zmp;
 
 typedef struct {
 	kseq_t *ks, *ks2;
-	FILE *fseeds;
+	gzFile f_out;
 	mem_opt_t *opt;
 	mem_pestat_t *pes0;
 	int64_t n_processed;
@@ -34,6 +34,7 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 	ktp_data_t *data = (ktp_data_t*)_data;
 	int i;
 	if (step == 0) {
+		double rtime_s = realtime();
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
@@ -48,29 +49,41 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 				ret->seqs[i].comment = 0;
 			}
 		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
+		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step1] Input %ldM bases\n", __func__, size / 1000 / 1000);
+			fprintf(stderr, "[%s_step1] Input %ldM bases in %.1f real sec\n",
+		        __func__, size / 1000 / 1000, rtime_e-rtime_s);
+		zmp.input[1] += rtime_e - rtime_s;
 		return ret;
 	} else if (step == 1) {
+		double ctime_s = cputime(), rtime_s = realtime();
 		const mem_opt_t *opt = aux->opt;
 		const bwaidx_t *idx = aux->idx;
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step2] Processing %d reads\n", __func__, data->n_seqs);
 		zipmem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		aux->n_processed += data->n_seqs;
+		double ctime_e = cputime(), rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Processing %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
+		        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
+		zmp.process[0] += ctime_e - ctime_s; zmp.process[1] += rtime_e - rtime_s;
 		return data;
 	} else if (step == 2) {
+		double rtime_s = realtime();
 		for (i = 0; i < data->n_seqs; ++i) {
 			// sam here is used to stores the seeds and the preceding number indicating memory cost.
-//			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
+			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
+			gzwrite(aux->f_out, data->seqs[i].sam, bytes);
 //			fwrite(data->seqs[i].sam, sizeof(uint8_t), bytes, stdout);
-//			free(data->seqs[i].sam);
+			free(data->seqs[i].sam);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual);
 		}
 		free(data->seqs); free(data);
+		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step3] Output seeds. %ld reads have been processed\n", __func__ , aux->n_processed);
+			fprintf(stderr, "[%s_step3] Output seeds in %.1f real sec, %ld reads have been processed\n",
+		        __func__ , rtime_e-rtime_s, aux->n_processed);
+		zmp.output[1] += rtime_e - rtime_s;
 		return 0;
 	}
 	return 0;
@@ -78,13 +91,14 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 
 static int usage() {
 	fprintf(stderr, "\n");
-	fprintf(stderr, "Usage: zipmem [options] <FM-index> <in1.fq> [in2.fq] > zip.seeds\n");
+	fprintf(stderr, "Usage: zipmem [options] <FM-index> -o zip.seeds <in1.fq> [in2.fq]\n");
 	fprintf(stderr, "Seeding options:\n");
 	fprintf(stderr, "    -k INT    minimum seed length [19]\n");
 	fprintf(stderr, "    -r FLOAT  look for internal seeds inside a seed longer than {-k} * FLOAT [1.5]\n");
 	fprintf(stderr, "    -y INT    seed occurrence for the 3rd round seeding [20]\n");
 	fprintf(stderr, "    -c INT    skip seeds with more than INT occurrences [500]\n");
 	fprintf(stderr, "    -s INT    MEM SA size upper bound to trigger re-seeding [10]\n");
+	fprintf(stderr, "    -o STR    Output seed files(gzipped)\n");
 	fprintf(stderr, "Common options(also suitable for `extend`):\n");
 	fprintf(stderr, "    -t INT    number of threads [1]\n");
 	fprintf(stderr, "    -K INT    process INT input bases in each batch regardless of nThreads (for reproducibility) [10M]\n");
@@ -107,22 +121,30 @@ int main(int argc, char *argv[]) {
 
 	memset(&aux, 0, sizeof(ktp_aux_t));
 	aux.opt = opt = mem_opt_init();
-	while ((c = getopt(argc, argv, "k:r:y:c:s:t:K:v:1")) >= 0) {
+	while ((c = getopt(argc, argv, "k:r:y:c:s:o:t:K:v:1")) >= 0) {
 		// Seeding options
 		if (c == 'k') opt->min_seed_len = (int)strtol(optarg, NULL, 10);
 		else if (c == 'r') opt->split_factor = strtof(optarg, NULL);
 		else if (c == 'y') opt->max_mem_intv = strtol(optarg, NULL, 10);
 		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
 		else if (c == 's') opt->split_width = (int)strtol(optarg, NULL, 10);
+		else if (c == 'o') aux.f_out = gzopen(optarg, "w");
 		// Common options
-		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
+		else if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
 		else if (c == 'K') fixed_chunk_size = (int)strtol(optarg, NULL, 10);
 		else if (c == 'v') bwa_verbose = (int)strtol(optarg, NULL, 10);
 		else if (c == '1') no_mt_io = 1;
 		else return 1;
 	}
 
+	if (aux.f_out == NULL) {
+		fprintf(stderr, "[%s] Open output file failed\n", __func__ );
+		free(opt);
+		return 1;
+	}
+
 	if (optind + 1 >= argc || optind + 3 < argc) {
+		fprintf(stderr, "[%s] Invalid usage\n", __func__ );
 		free(opt);
 		return 1;
 	}
