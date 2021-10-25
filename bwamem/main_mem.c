@@ -57,7 +57,7 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 			}
 		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step1] Input %d reads (%ld bp)\n", __func__, ret->n_seqs, (long)size);
+			fprintf(stderr, "[%s_step1] input %d reads (%ld bp)\n", __func__, ret->n_seqs, (long)size);
 		return ret;
 	} else if (step == 1) {
 		const mem_opt_t *opt = aux->opt;
@@ -219,9 +219,10 @@ static void *tp_extending(void *shared, int step, void *_data) {
 		for (i = 0; i < ret->n_seqs; i++) {
 			long seed_bytes = 0;
 			fread(&seed_bytes, sizeof(long), 1, aux->fseeds);
+			seed_bytes += sizeof(long);
 			total_bytes += seed_bytes;
 			ret->seeds[i] = malloc(seed_bytes);
-			fread(ret->seeds[i], sizeof(uint8_t), seed_bytes, aux->fseeds);
+			fread(ret->seeds[i] + sizeof(long), sizeof(uint8_t), seed_bytes, aux->fseeds);
 		}
 		if (bwa_verbose >= 3) {
 			fprintf(stderr, "[%s_step1] Input %d reads (%ld bp) and %ld MB seeds\n",
@@ -426,9 +427,202 @@ int extend_main(int argc, char *argv[]) {
 	return 0;
 }
 
+static void *tp_seed_extend(void *shared, int step, void *_data) {
+	ktp_aux_t *aux = (ktp_aux_t*)shared;
+	ktp_data_t *data = (ktp_data_t*)_data;
+	int i;
+	if (step == 0) {
+		double rtime_s = realtime();
+		ktp_data_t *ret;
+		int64_t size = 0;
+		ret = calloc(1, sizeof(ktp_data_t));
+		ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		if (ret->seqs == 0) {
+			free(ret);
+			return 0;
+		}
+		if (!aux->copy_comment)
+			for (i = 0; i < ret->n_seqs; ++i) {
+				free(ret->seqs[i].comment);
+				ret->seqs[i].comment = 0;
+			}
+		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
+		double rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step1] Input %d reads (%ld Mbp) in %.1f real sec\n",
+		        __func__, ret->n_seqs, size / 1000 / 1000, rtime_e-rtime_s);
+		return ret;
+	} else if (step == 1) {
+		double ctime_s = cputime(), rtime_s = realtime();
+		const mem_opt_t *opt = aux->opt;
+		const bwaidx_t *idx = aux->idx;
+		mem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
+		double ctime_e = cputime(), rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Seeding for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
+			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
+
+		// Here, seeds are buffered in $seqs[i].sam
+		ctime_s = cputime(); rtime_s = realtime();
+		data->seeds = malloc(sizeof(uint8_t*) * data->n_seqs);
+		for (i = 0; i < data->n_seqs; i++) data->seeds[i] = (uint8_t*)data->seqs[i].sam;
+		mem_extend(opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, data->n_seqs, data->seeds, data->seqs, aux->pes0);
+		aux->n_processed += data->n_seqs;
+		ctime_e = cputime(); rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Extending for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
+			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
+		return data;
+	} else if (step == 2) {
+		double rtime_s = realtime();
+		for (i = 0; i < data->n_seqs; ++i) {
+			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
+			free(data->seqs[i].name); free(data->seqs[i].comment);
+			free(data->seqs[i].seq); free(data->seqs[i].qual);
+			free(data->seqs[i].sam);
+			// Seeds are deallocated by the core function in step2.
+		}
+		free(data->seqs); free(data);
+		double rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step3] Output SAM in %.1f real sec, %ld reads have been processed\n",
+			        __func__ , rtime_e-rtime_s, aux->n_processed);
+		return 0;
+	}
+	return 0;
+}
+
+int seed_extend_main(int argc, char *argv[]) {
+	int c;
+	int no_mt_io = 0; // Multiple IO thread label
+	int fixed_chunk_size = -1;
+	char *p;
+	int i, fd, fd2;
+	void *ko = 0, *ko2 = 0;
+	gzFile fp, fp2 = 0;
+	mem_opt_t *opt, opt0;
+	ktp_aux_t aux;
+	mem_pestat_t pes[4];
+
+	memset(&aux, 0, sizeof(ktp_aux_t));
+	memset(pes, 0, 4 * sizeof(mem_pestat_t));
+	for (i = 0; i < 4; ++i) pes[i].failed = 1;
+
+	aux.opt = opt = mem_opt_init();
+	memset(&opt0, 0, sizeof(opt0));
+
+	while ((c = getopt(argc, argv, "k:r:y:c:s:t:K:v:1c:D:W:G:N:X:w:d:A:B:O:E:L:U:I:m:SPT:aC")) >= 0) {
+		// Seeding options
+		if (c == 'k') opt->min_seed_len = (int)strtol(optarg, NULL, 10);
+		else if (c == 'r') opt->split_factor = strtof(optarg, NULL);
+		else if (c == 'y') opt->max_mem_intv = strtol(optarg, NULL, 10);
+		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
+		else if (c == 's') opt->split_width = (int)strtol(optarg, NULL, 10);
+		// Common options
+		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
+		else if (c == 'K') fixed_chunk_size = (int)strtol(optarg, NULL, 10);
+		else if (c == 'v') bwa_verbose = (int)strtol(optarg, NULL, 10);
+		else if (c == '1') no_mt_io = 1;
+		// Chaining
+		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
+		else if (c == 'D') opt->drop_ratio = strtof(optarg, NULL);
+		else if (c == 'W') opt->min_chain_weight = (int)strtol(optarg, NULL, 10);
+		else if (c == 'G') opt->max_chain_gap = (int)strtol(optarg, NULL, 10);
+		else if (c == 'N') opt->max_chain_extend = (int)strtol(optarg, NULL, 10);
+		else if (c == 'X') opt->mask_level = strtof(optarg, NULL);
+		// Smith-Waterman
+		else if (c == 'w') opt->w = (int)strtol(optarg, NULL, 10);
+		else if (c == 'd') opt->zdrop = (int)strtol(optarg, NULL, 10);
+		else if (c == 'A') opt->a = (int)strtol(optarg, NULL, 10), opt0.a = 1;
+		else if (c == 'B') opt->b = (int)strtol(optarg, NULL, 10), opt0.b = 1;
+		else if (c == 'O') {
+			opt0.o_del = opt0.o_ins = 1;
+			opt->o_del = opt->o_ins = (int)strtol(optarg, &p, 10);
+			if (*p != 0) opt->o_ins = (int)strtol(p+1, &p, 10);
+		} else if (c == 'E') {
+			opt0.e_del = opt0.e_ins = 1;
+			opt->e_del = opt->e_ins = (int)strtol(optarg, &p, 10);
+			if (*p != 0) opt->e_ins = (int)strtol(p+1, &p, 10);
+		} else if (c == 'L') {
+			opt0.pen_clip5 = opt0.pen_clip3 = 1;
+			opt->pen_clip5 = opt->pen_clip3 = (int)strtol(optarg, &p, 10);
+			if (*p != 0) opt->pen_clip3 = (int)strtol(p+1, &p, 10);
+		}
+		else if (c == 'U') opt->pen_unpaired = (int)strtol(optarg, &p, 10), opt0.pen_unpaired = 1;
+			// Paired-end
+		else if (c == 'I') { // specify the insert size distribution
+			aux.pes0 = pes;
+			pes[1].failed = 0;
+			pes[1].avg = strtod(optarg, &p);
+			pes[1].std = pes[1].avg * .1;
+			if (*p != 0) pes[1].std = strtod(p+1, &p);
+			pes[1].high = (int)(pes[1].avg + 4. * pes[1].std + .499);
+			pes[1].low  = (int)(pes[1].avg - 4. * pes[1].std + .499);
+			if (pes[1].low < 1) pes[1].low = 1;
+			if (*p != 0) pes[1].high = (int)(strtod(p+1, &p) + .499);
+			if (*p != 0) pes[1].low  = (int)(strtod(p+1, &p) + .499);
+			if (bwa_verbose >= 3)
+				fprintf(stderr, "[M::%s] mean insert size: %.3f, stddev: %.3f, max: %d, min: %d\n",
+				        __func__, pes[1].avg, pes[1].std, pes[1].high, pes[1].low);
+		}
+		else if (c == 'm') opt->max_matesw = (int)strtol(optarg, &p, 10);
+		else if (c == 'S') opt->flag |= MEM_F_NO_RESCUE;
+		else if (c == 'P') opt->flag |= MEM_F_NOPAIRING;
+			// SAM format
+		else if (c == 'T') opt->T = (int)strtol(optarg, &p, 10), opt0.T = 1;
+		else if (c == 'a') opt->flag |= MEM_F_ALL;
+		else if (c == 'C') aux.copy_comment = 1;
+		else return 1;
+	}
+
+	if (optind + 1 >= argc || optind + 3 < argc) {
+		free(opt);
+		return 1;
+	}
+
+	update_a(opt, &opt0);
+	bwa_fill_scmat(opt->a, opt->b, opt->mat);
+
+	aux.idx = bwa_idx_load_from_shm(argv[optind]);
+	if (aux.idx == 0) {
+		if ((aux.idx = bwa_idx_load(argv[optind], BWA_IDX_ALL)) == 0) return 1;
+	} else if (bwa_verbose >= 3)
+		fprintf(stderr, "[M::%s] load the bwa index from shared memory\n", __func__);
+
+	ko = kopen(argv[optind + 1], &fd);
+	if (ko == 0) {
+		if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
+		return 1;
+	}
+	fp = gzdopen(fd, "r");
+	aux.ks = kseq_init(fp);
+	if (optind + 2 < argc) {
+		ko2 = kopen(argv[optind + 2], &fd2);
+		if (ko2 == 0) {
+			if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 2]);
+			return 1;
+		}
+		fp2 = gzdopen(fd2, "r");
+		aux.ks2 = kseq_init(fp2);
+		opt->flag |= MEM_F_PE;
+	}
+	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
+
+	kt_pipeline(no_mt_io? 1 : 2, tp_seed_extend, &aux, 3);
+	free(opt);
+	bwa_idx_destroy(aux.idx);
+	kseq_destroy(aux.ks);
+	err_gzclose(fp); kclose(ko);
+	if (aux.ks2) {
+		kseq_destroy(aux.ks2);
+		err_gzclose(fp2); kclose(ko2);
+	}
+	return 0;
+}
+
 static int usage() {
 	fprintf(stderr, "\n");
-	fprintf(stderr, "Usage: bwamem <seeding / extend>\n");
+	fprintf(stderr, "Usage: bwamem [seeding / extend]\n");
 	fprintf(stderr, "  BWA-MEM (version %s) follows the seed-and-extend paradigm\n", BWA_PACKAGE_VERSION);
 	fprintf(stderr, "  Command `seeding` is collecting candidate hits for query reads\n");
 	fprintf(stderr, "  Command `extend` performs Smith-Waterman around seeds for final alignments\n");
@@ -437,6 +631,7 @@ static int usage() {
 	fprintf(stderr, "  Sample usage:\n");
 	fprintf(stderr, "    bwamem seeding <FM-index> data1.fq > data1.seeds\n");
 	fprintf(stderr, "    bwamem extend <FM-index> data1.seeds data1.fq > data.sam\n");
+	fprintf(stderr, "  Without any command, complete BWA-MEM (seed-and-extend) will be run\n");
 	fprintf(stderr, "\n");
 	return 0;
 }
@@ -453,10 +648,7 @@ int main(int argc, char *argv[]) {
 	double rtime = realtime();
 	if (!strcmp(argv[1], "seeding")) ret = seeding_main(argc-1, argv+1);
 	else if (!strcmp(argv[1], "extend")) ret = extend_main(argc-1, argv+1);
-	else {
-		ret = 1;
-		fprintf(stderr, "Only commands `seeding` and `extend` are allowed\n");
-	}
+	else ret = seed_extend_main(argc, argv);
 	err_fflush(stdout);
 	err_fclose(stdout);
 	if (ret == 0) {

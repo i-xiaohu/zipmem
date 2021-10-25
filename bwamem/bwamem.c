@@ -1217,7 +1217,7 @@ static void extend_worker1(void *data, long seq_id, int t_id) {
 	const bwt_t *bwt = w->bwt;
 	const bntseq_t *bns = w->bns;
 	const uint8_t *pac = w->pac;
-	uint8_t *seeds = w->seeds[seq_id];
+	uint8_t *seeds = w->seeds[seq_id] + sizeof(long); // Skip the bytes indicator
 	bseq1_t *read = &w->seqs[seq_id];
 
 	int i;
@@ -1226,7 +1226,7 @@ static void extend_worker1(void *data, long seq_id, int t_id) {
 	}
 
 	mem_chain_v chn = mem_chain(opt, bwt, bns, pac, read->l_seq, (uint8_t*)read->seq, seeds);
-	free(seeds);
+	free(w->seeds[seq_id]); // Free the correct pointer.
 	chn.n = mem_chain_flt(opt, chn.n, chn.a);
 	if (bwa_verbose >= 4) mem_print_chain(bns, &chn);
 
