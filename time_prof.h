@@ -13,15 +13,14 @@ typedef struct {
 	long reused_n[256];
 	long sup_n[256];
 	// Time
-	double input[2];
-	double process[2];
-	double output[2];
 	double allocate[2];
 	double assemble[2];
 	double sumup[2];
 	double t_gencs[2];
 	double t_csseed[2];
 	double t_supseed[2];
+	double t_seeding[2];
+	double t_extending[2];
 } zsmem_prof_t;
 
 typedef struct {
@@ -35,10 +34,6 @@ static void zsmem_prof_output(zsmem_prof_t *a) {
 	for (i = 1; i < 256; i++) a->reused_n[0] += a->reused_n[i];
 	for (i = 1; i < 256; i++) a->sup_n[0] += a->sup_n[i];
 
-	fprintf(stderr, "Input_time  \t%.1f\n", a->input[1]);
-	fprintf(stderr, "Process_time\t%.1f\t%.1f\t%.1fX\n",
-		 a->process[0], a->process[1], a->process[0]/a->process[1]);
-	fprintf(stderr, "output_time \t%.1f\n", a->output[1]);
 	fprintf(stderr, "gencs_time  \t%.1f\t%.1f\t%.1fX\n",
 		 a->t_gencs[0], a->t_gencs[1], a->t_gencs[0]/a->t_gencs[1]);
 	fprintf(stderr, "  Allocating\t%.1f\t%.1f\n", a->allocate[0], a->allocate[1]);

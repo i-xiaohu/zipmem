@@ -236,7 +236,7 @@ static void *tp_extending(void *shared, int step, void *_data) {
 			seed_bytes += sizeof(long);
 			total_bytes += seed_bytes;
 			ret->seeds[i] = malloc(seed_bytes);
-			fread(ret->seeds[i] + sizeof(long), sizeof(uint8_t), seed_bytes, aux->fseeds);
+			fread(ret->seeds[i] + sizeof(long), sizeof(uint8_t), seed_bytes - sizeof(long), aux->fseeds);
 		}
 		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
@@ -293,7 +293,7 @@ static int extend_usage() {
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Usage: bwamem extend [options] <FM-index> <mem.seeds> <in1.fq> [in2.fq] > aln.sam\n");
 	fprintf(stderr, "Seeds chaining options\n");
-	fprintf(stderr, "    -c INT    skip seeds with more than INT occurrences [500]\n");
+	fprintf(stderr, "    -c INT        skip seeds with more than INT occurrences [500]\n");
 	fprintf(stderr, "    -D FLOAT      drop chains shorter than FLOAT fraction of the longest overlapping chain [0.5]\n");
 	fprintf(stderr, "    -W INT        discard a chain if seeded bases shorter than INT [0]\n");
 	fprintf(stderr, "    -G INT        maximum gap between seeds to chain [10000]\n");
@@ -628,6 +628,8 @@ int seed_extend_main(int argc, char *argv[]) {
 		aux.ks2 = kseq_init(fp2);
 		opt->flag |= MEM_F_PE;
 	}
+
+	bwa_print_sam_hdr(aux.idx->bns, NULL);
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 
 	kt_pipeline(no_mt_io? 1 : 2, tp_seed_extend, &aux, 3);
