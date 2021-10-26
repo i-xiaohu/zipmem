@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <math.h>
 
+#include "../time_prof.h"
 #include "../bwalib/bwa.h"
 #include "../bwalib/utils.h"
 #include "../bwalib/kopen.h"
@@ -18,6 +19,8 @@
 #endif
 
 KSEQ_DECLARE(gzFile)
+
+bwamem_prof_t bmp;
 
 typedef struct {
 	kseq_t *ks, *ks2;
@@ -42,6 +45,7 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 	ktp_data_t *data = (ktp_data_t*)_data;
 	int i;
 	if (step == 0) {
+		double rtime_s = realtime();
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
@@ -56,18 +60,25 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 				ret->seqs[i].comment = 0;
 			}
 		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
+		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step1] input %d reads (%ld bp)\n", __func__, ret->n_seqs, (long)size);
+			fprintf(stderr, "[%s_step1] Input %d reads (%ld Mbp) in %.1f real sec\n",
+			        __func__, ret->n_seqs, size / 1000 / 1000, rtime_e-rtime_s);
 		return ret;
 	} else if (step == 1) {
+		double ctime_s = cputime(), rtime_s = realtime();
 		const mem_opt_t *opt = aux->opt;
 		const bwaidx_t *idx = aux->idx;
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step2] Process reads\n", __func__ );
 		mem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		aux->n_processed += data->n_seqs;
+		double ctime_e = cputime(), rtime_e = realtime();
+		bmp.t_seeding[0] += ctime_e - ctime_s; bmp.t_seeding[1] += rtime_e - rtime_s;
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Seeding for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
+			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
 		return data;
 	} else if (step == 2) {
+		double rtime_s = realtime();
 		for (i = 0; i < data->n_seqs; ++i) {
 			// sam here is used to stores the seeds and the preceding number indicating memory cost.
 			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
@@ -76,8 +87,10 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 			free(data->seqs[i].seq); free(data->seqs[i].qual); free(data->seqs[i].sam);
 		}
 		free(data->seqs); free(data);
+		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step3] Output seeds. %ld reads have been processed\n", __func__ , aux->n_processed);
+			fprintf(stderr, "[%s_step3] Output seeds in %.1f real sec, %ld reads have been processed\n",
+			        __func__ , rtime_e-rtime_s, aux->n_processed);
 		return 0;
 	}
 	return 0;
@@ -200,6 +213,7 @@ static void *tp_extending(void *shared, int step, void *_data) {
 	ktp_data_t *data = (ktp_data_t*)_data;
 	int i;
 	if (step == 0) {
+		double rtime_s = realtime();
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
@@ -224,21 +238,25 @@ static void *tp_extending(void *shared, int step, void *_data) {
 			ret->seeds[i] = malloc(seed_bytes);
 			fread(ret->seeds[i] + sizeof(long), sizeof(uint8_t), seed_bytes, aux->fseeds);
 		}
-		if (bwa_verbose >= 3) {
-			fprintf(stderr, "[%s_step1] Input %d reads (%ld bp) and %ld MB seeds\n",
-		            __func__, ret->n_seqs, (long)size, total_bytes / 1024 / 1024);
-		}
+		double rtime_e = realtime();
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step1] Input %d reads (%ld Mbp) and %ld MB seeds in %.1f real sec\n",
+			        __func__, ret->n_seqs, size / 1000 / 1000, total_bytes / 1024 / 1024, rtime_e-rtime_s);
 		return ret;
 	} else if (step == 1) {
+		double ctime_s = cputime(), rtime_s = realtime();
 		const mem_opt_t *opt = aux->opt;
 		const bwaidx_t *idx = aux->idx;
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step2] Process reads\n", __func__ );
-//		output_seeds(data->n_seqs, data->seeds, data->seqs);
 		mem_extend(opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, data->n_seqs, data->seeds, data->seqs, aux->pes0);
 		aux->n_processed += data->n_seqs;
+		double ctime_e = cputime(), rtime_e = realtime();
+		bmp.t_extending[0] += ctime_e - ctime_s; bmp.t_extending[1] += rtime_e - rtime_s;
+		if (bwa_verbose >= 3)
+			fprintf(stderr, "[%s_step2] Extending for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
+			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
 		return data;
 	} else if (step == 2) {
+		double rtime_s = realtime();
 		for (i = 0; i < data->n_seqs; ++i) {
 			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
@@ -247,8 +265,10 @@ static void *tp_extending(void *shared, int step, void *_data) {
 			// Seeds are deallocated by the core function in step2.
 		}
 		free(data->seqs); free(data);
+		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step3] Output SAM. %ld reads have been processed\n", __func__ , aux->n_processed);
+			fprintf(stderr, "[%s_step3] Output SAM in %.1f real sec, %ld reads have been processed\n",
+			        __func__ , rtime_e-rtime_s, aux->n_processed);
 		return 0;
 	}
 	return 0;
@@ -458,6 +478,7 @@ static void *tp_seed_extend(void *shared, int step, void *_data) {
 		const bwaidx_t *idx = aux->idx;
 		mem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		double ctime_e = cputime(), rtime_e = realtime();
+		bmp.t_seeding[0] += ctime_e - ctime_s; bmp.t_seeding[1] += rtime_e - rtime_s;
 		if (bwa_verbose >= 3)
 			fprintf(stderr, "[%s_step2] Seeding for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
 			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
@@ -469,6 +490,7 @@ static void *tp_seed_extend(void *shared, int step, void *_data) {
 		mem_extend(opt, idx->bwt, idx->bns, idx->pac, aux->n_processed, data->n_seqs, data->seeds, data->seqs, aux->pes0);
 		aux->n_processed += data->n_seqs;
 		ctime_e = cputime(); rtime_e = realtime();
+		bmp.t_extending[0] += ctime_e - ctime_s; bmp.t_extending[1] += rtime_e - rtime_s;
 		if (bwa_verbose >= 3)
 			fprintf(stderr, "[%s_step2] Extending for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
 			        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
@@ -645,6 +667,7 @@ int main(int argc, char *argv[]) {
 	for (i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
 	bwa_pg = pg.s;
 
+	memset(&bmp, 0, sizeof(bmp));
 	double rtime = realtime();
 	if (!strcmp(argv[1], "seeding")) ret = seeding_main(argc-1, argv+1);
 	else if (!strcmp(argv[1], "extend")) ret = extend_main(argc-1, argv+1);
@@ -656,7 +679,12 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "CMD:");
 		for (i = 0; i < argc; ++i) fprintf(stderr, " %s", argv[i]);
 		fprintf(stderr, "\n");
-		fprintf(stderr, "Time cost for %s: %.2f real sec, %.2f CPU sec\n", argv[1], realtime()-rtime, cputime());
+		fprintf(stderr, "Total time cost: %.2f CPU sec, %.2f real sec\n", cputime(), realtime()-rtime);
+		if (strcmp(argv[1], "extend") != 0) fprintf(stderr, "    Seeding:     %.2f CPU sec, %.2f real sec\n", bmp.t_seeding[0], bmp.t_seeding[1]);
+		if (strcmp(argv[1], "seeding")!= 0) fprintf(stderr, "    Extending:   %.2f CPU sec, %.2f real sec\n", bmp.t_extending[0], bmp.t_extending[1]);
+		fprintf(stderr, "    IO:          %.2f CPU sec, %.2f real sec\n",
+	        cputime()-bmp.t_seeding[0]-bmp.t_extending[0],
+		    realtime()-rtime-bmp.t_seeding[1]-bmp.t_extending[1]);
 	}
 	free(bwa_pg);
 	return 0;

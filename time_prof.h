@@ -24,6 +24,11 @@ typedef struct {
 	double t_supseed[2];
 } zsmem_prof_t;
 
+typedef struct {
+	double t_seeding[2];
+	double t_extending[2];
+} bwamem_prof_t;
+
 static void zsmem_prof_output(zsmem_prof_t *a) {
 	int i;
 	for (i = 1; i < 256; i++) a->mis_n[0] += a->mis_n[i];
