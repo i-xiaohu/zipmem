@@ -184,7 +184,8 @@ static void gen_cs_worker(void *data, long c_id, int t_id) {
 con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *aux) {
 	double ctime_s = cputime(), rtime_s = realtime();
 	cs_worker_t w;
-	w.chunks_n = threads_n; // Split the reads set into $threads_n uniform chunks
+	int each_chunk_size = (n+threads_n-1) / threads_n; // ceil(n / threads)
+	w.chunks_n = (n+each_chunk_size-1)/each_chunk_size; // Split the reads set into $threads_n uniform chunks
 	w.n = n;
 	w.reads = reads;
 	w.aux = aux;
@@ -198,8 +199,8 @@ con_seq_v connect_reads_to_cs(int threads_n, int n, bseq1_t *reads, cs_aux_t *au
 	con_seq_v csv; kv_init(csv);
 	int i, j;
 	for(i = 0; i < w.chunks_n; i++) {
-		int reads_l = (n+w.chunks_n-1)/w.chunks_n * i;
-		int reads_r = reads_l + (n+w.chunks_n-1)/w.chunks_n;
+		int reads_l = each_chunk_size * i;
+		int reads_r = reads_l + each_chunk_size;
 		reads_r = reads_r < n ?reads_r :n;
 		for(j = reads_l; j < reads_r; j++) {
 			w.aux->belong_to[j] += csv.n;
