@@ -228,7 +228,7 @@ static void *tp_extending(void *shared, int step, void *_data) {
 		return data;
 	} else if (step == 2) {
 		double rtime_s = realtime();
-		for (i = 0; i < data->n_seqs; ++i) {
+		for (i = 0; i < data->n_seqs; i++) {
 			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual);
@@ -312,7 +312,6 @@ int extend_main(int argc, char *argv[]) {
 	for (i = 0; i < 4; ++i) pes[i].failed = 1;
 
 	aux.opt = opt = mem_opt_init();
-//	aux.opt->max_chain_extend = 5000; // Set a proper number for zipmem
 	memset(&opt0, 0, sizeof(mem_opt_t));
 	while ((c = getopt(argc, argv, "t:K:v:1c:D:W:G:N:X:w:d:A:B:O:E:L:U:I:m:SPT:aC")) >= 0) {
 		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
@@ -507,7 +506,6 @@ int seed_extend_main(int argc, char *argv[]) {
 	for (i = 0; i < 4; ++i) pes[i].failed = 1;
 
 	aux.opt = opt = mem_opt_init();
-//	aux.opt->max_chain_extend = 5000;
 	memset(&opt0, 0, sizeof(opt0));
 
 	while ((c = getopt(argc, argv, "k:r:y:c:s:t:K:v:1c:D:W:G:N:X:w:d:A:B:O:E:L:U:I:m:SPT:aC")) >= 0) {
@@ -518,7 +516,7 @@ int seed_extend_main(int argc, char *argv[]) {
 		else if (c == 'c') opt->max_occ = (int)strtol(optarg, NULL, 10);
 		else if (c == 's') opt->split_width = (int)strtol(optarg, NULL, 10);
 		// Common options
-		if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
+		else if (c == 't') opt->n_threads = (int)strtol(optarg, NULL, 10), opt->n_threads = opt->n_threads > 1? opt->n_threads : 1;
 		else if (c == 'K') fixed_chunk_size = (int)strtol(optarg, NULL, 10);
 		else if (c == 'v') bwa_verbose = (int)strtol(optarg, NULL, 10);
 		else if (c == '1') no_mt_io = 1;
@@ -657,10 +655,12 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Total time cost: %.2f CPU sec, %.2f real sec\n", cputime(), realtime()-rtime);
 		if (strcmp(argv[1], "extend") != 0) fprintf(stderr, "    Seeding:     %.2f CPU sec, %.2f real sec\n", zmp.t_seeding[0], zmp.t_seeding[1]);
-		if (strcmp(argv[1], "seeding")!= 0) fprintf(stderr, "    Extending:   %.2f CPU sec, %.2f real sec\n", zmp.t_extending[0], zmp.t_extending[1]);
-		fprintf(stderr, "    IO:          %.2f CPU sec, %.2f real sec\n",
+		if (strcmp(argv[1], "seeding")!= 0) fprintf(stderr, "    Extend:      %.2f CPU sec, %.2f real sec\n", zmp.t_extending[0], zmp.t_extending[1]);
+            fprintf(stderr, "    Extra IO:    %.2f CPU sec, %.2f real sec\n",
 		        cputime()-zmp.t_seeding[0]-zmp.t_extending[0],
 		        realtime()-rtime-zmp.t_seeding[1]-zmp.t_extending[1]);
+		fprintf(stderr, "The extra IO is not overlapping with seeding/extend. It does not happen in real mapping scenario.\n");
+		fprintf(stderr, "Please take the seeding/extend time above as real value instead of the runtime of program.\n");
 	}
 	free(bwa_pg);
 	return 0;

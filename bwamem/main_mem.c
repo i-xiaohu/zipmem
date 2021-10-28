@@ -683,10 +683,12 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Total time cost: %.2f CPU sec, %.2f real sec\n", cputime(), realtime()-rtime);
 		if (strcmp(argv[1], "extend") != 0) fprintf(stderr, "    Seeding:     %.2f CPU sec, %.2f real sec\n", bmp.t_seeding[0], bmp.t_seeding[1]);
-		if (strcmp(argv[1], "seeding")!= 0) fprintf(stderr, "    Extending:   %.2f CPU sec, %.2f real sec\n", bmp.t_extending[0], bmp.t_extending[1]);
-		fprintf(stderr, "    IO:          %.2f CPU sec, %.2f real sec\n",
+		if (strcmp(argv[1], "seeding")!= 0) fprintf(stderr, "    Extend:      %.2f CPU sec, %.2f real sec\n", bmp.t_extending[0], bmp.t_extending[1]);
+        fprintf(stderr, "    Extra IO:    %.2f CPU sec, %.2f real sec\n",
 	        cputime()-bmp.t_seeding[0]-bmp.t_extending[0],
 		    realtime()-rtime-bmp.t_seeding[1]-bmp.t_extending[1]);
+		fprintf(stderr, "The extra IO is not overlapping with seeding/extend. It does not happen in real mapping scenario.\n");
+		fprintf(stderr, "Please take the seeding/extend time above as real value instead of the runtime of program.\n");
 	}
 	free(bwa_pg);
 	return 0;
