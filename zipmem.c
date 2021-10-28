@@ -442,6 +442,7 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	*(int*)(read->sam + sizeof(long)) = a->mem.n;
 	assert(p3 == total_bytes);
 	free(reused_mem);
+	if (is_rc) reverse_complement(len, bases);
 }
 
 void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
