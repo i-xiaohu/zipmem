@@ -7,6 +7,7 @@
 #include <math.h>
 
 #include "../time_prof.h"
+#include "../read_input.h"
 #include "../bwalib/bwa.h"
 #include "../bwalib/utils.h"
 #include "../bwalib/kopen.h"
@@ -24,6 +25,8 @@ bwamem_prof_t bmp;
 
 typedef struct {
 	kseq_t *ks, *ks2;
+	int n_has_input;
+	gzFile freads; // For only inputting bases
 	FILE *fseeds;
 	mem_opt_t *opt;
 	mem_pestat_t *pes0;
@@ -49,11 +52,13 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
-		ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		if (aux->ks) ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		else ret->seqs = load_reads(aux->n_has_input, aux->actual_chunk_size, &ret->n_seqs, aux->freads);
 		if (ret->seqs == 0) {
 			free(ret);
 			return 0;
 		}
+		aux->n_has_input += ret->n_seqs;
 		if (!aux->copy_comment)
 			for (i = 0; i < ret->n_seqs; ++i) {
 				free(ret->seqs[i].comment);
@@ -153,13 +158,19 @@ int seeding_main(int argc, char *argv[]) {
 	} else if (bwa_verbose >= 3)
 		fprintf(stderr, "[M::%s] load the bwa index from shared memory\n", __func__);
 
-	ko = kopen(argv[optind + 1], &fd);
-	if (ko == 0) {
-		if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
-		return 1;
+	int not_fastaq = is_reads_file(argv[optind + 1]);
+	if (not_fastaq) {
+		aux.freads = gzopen(argv[optind + 1], "r");
+	} else {
+		ko = kopen(argv[optind + 1], &fd);
+		if (ko == 0) {
+			if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
+			return 1;
+		}
+		fp = gzdopen(fd, "r");
+		aux.ks = kseq_init(fp);
 	}
-	fp = gzdopen(fd, "r");
-	aux.ks = kseq_init(fp);
+
 	if (optind + 2 < argc) {
 		ko2 = kopen(argv[optind + 2], &fd2);
 		if (ko2 == 0) {
@@ -170,12 +181,18 @@ int seeding_main(int argc, char *argv[]) {
 		aux.ks2 = kseq_init(fp2);
 		opt->flag |= MEM_F_PE;
 	}
+
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 	kt_pipeline(no_mt_io? 1 : 2, tp_seeding, &aux, 3);
+
 	free(opt);
 	bwa_idx_destroy(aux.idx);
-	kseq_destroy(aux.ks);
-	err_gzclose(fp); kclose(ko);
+	if (not_fastaq) {
+		gzclose(aux.freads);
+	} else {
+		kseq_destroy(aux.ks);
+		err_gzclose(fp); kclose(ko);
+	}
 	if (aux.ks2) {
 		kseq_destroy(aux.ks2);
 		err_gzclose(fp2); kclose(ko2);
@@ -217,11 +234,13 @@ static void *tp_extending(void *shared, int step, void *_data) {
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
-		ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		if (aux->ks) ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		else ret->seqs = load_reads(aux->n_has_input, aux->actual_chunk_size, &ret->n_seqs, aux->freads);
 		if (ret->seqs == 0) {
 			free(ret);
 			return 0;
 		}
+		aux->n_has_input += ret->n_seqs;
 		if (!aux->copy_comment)
 			for (i = 0; i < ret->n_seqs; ++i) {
 				free(ret->seqs[i].comment);
@@ -414,13 +433,20 @@ int extend_main(int argc, char *argv[]) {
 		fprintf(stderr, "[M::%s] load the bwa index from shared memory\n", __func__);
 
 	aux.fseeds = fopen(argv[optind + 1], "rb");
-	ko = kopen(argv[optind + 2], &fd);
-	if (ko == 0) {
-		if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 2]);
-		return 1;
+
+	int not_fastaq = is_reads_file(argv[optind + 2]);
+	if (not_fastaq) {
+		aux.freads = gzopen(argv[optind + 2], "r");
+	} else {
+		ko = kopen(argv[optind + 2], &fd);
+		if (ko == 0) {
+			if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
+			return 1;
+		}
+		fp = gzdopen(fd, "r");
+		aux.ks = kseq_init(fp);
 	}
-	fp = gzdopen(fd, "r");
-	aux.ks = kseq_init(fp);
+
 	if (optind + 3 < argc) {
 		ko2 = kopen(argv[optind + 3], &fd2);
 		if (ko2 == 0) {
@@ -435,11 +461,16 @@ int extend_main(int argc, char *argv[]) {
 	bwa_print_sam_hdr(aux.idx->bns, NULL);
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 	kt_pipeline(no_mt_io? 1 : 2, tp_extending, &aux, 3);
+
 	free(opt);
 	bwa_idx_destroy(aux.idx);
 	fclose(aux.fseeds);
-	kseq_destroy(aux.ks);
-	err_gzclose(fp); kclose(ko);
+	if (not_fastaq) {
+		gzclose(aux.freads);
+	} else {
+		kseq_destroy(aux.ks);
+		err_gzclose(fp); kclose(ko);
+	}
 	if (aux.ks2) {
 		kseq_destroy(aux.ks2);
 		err_gzclose(fp2); kclose(ko2);
@@ -456,11 +487,13 @@ static void *tp_seed_extend(void *shared, int step, void *_data) {
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
-		ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		if (aux->ks) ret->seqs = bseq_read(aux->actual_chunk_size, &ret->n_seqs, aux->ks, aux->ks2);
+		else ret->seqs = load_reads(aux->n_has_input, aux->actual_chunk_size, &ret->n_seqs, aux->freads);
 		if (ret->seqs == 0) {
 			free(ret);
 			return 0;
 		}
+		aux->n_has_input += ret->n_seqs;
 		if (!aux->copy_comment)
 			for (i = 0; i < ret->n_seqs; ++i) {
 				free(ret->seqs[i].comment);
@@ -611,13 +644,19 @@ int seed_extend_main(int argc, char *argv[]) {
 	} else if (bwa_verbose >= 3)
 		fprintf(stderr, "[M::%s] load the bwa index from shared memory\n", __func__);
 
-	ko = kopen(argv[optind + 1], &fd);
-	if (ko == 0) {
-		if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
-		return 1;
+	int not_fastaq = is_reads_file(argv[optind + 1]);
+	if (not_fastaq) {
+		aux.freads = gzopen(argv[optind + 1], "r");
+	} else {
+		ko = kopen(argv[optind + 1], &fd);
+		if (ko == 0) {
+			if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] fail to open file `%s'.\n", __func__, argv[optind + 1]);
+			return 1;
+		}
+		fp = gzdopen(fd, "r");
+		aux.ks = kseq_init(fp);
 	}
-	fp = gzdopen(fd, "r");
-	aux.ks = kseq_init(fp);
+
 	if (optind + 2 < argc) {
 		ko2 = kopen(argv[optind + 2], &fd2);
 		if (ko2 == 0) {
@@ -631,12 +670,16 @@ int seed_extend_main(int argc, char *argv[]) {
 
 	bwa_print_sam_hdr(aux.idx->bns, NULL);
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
-
 	kt_pipeline(no_mt_io? 1 : 2, tp_seed_extend, &aux, 3);
+
 	free(opt);
 	bwa_idx_destroy(aux.idx);
-	kseq_destroy(aux.ks);
-	err_gzclose(fp); kclose(ko);
+	if (not_fastaq) {
+		gzclose(aux.freads);
+	} else {
+		kseq_destroy(aux.ks);
+		err_gzclose(fp); kclose(ko);
+	}
 	if (aux.ks2) {
 		kseq_destroy(aux.ks2);
 		err_gzclose(fp2); kclose(ko2);
