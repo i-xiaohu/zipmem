@@ -53,6 +53,7 @@ static uint8_t** load_seeds(int n_chunk_bound, FILE *f, int *n, long *size) {
 typedef struct {
 	int qb, qe;
 	long rb, re;
+	long sa_size;
 } seed_t;
 typedef kvec_t(seed_t) seed_v;
 
@@ -77,6 +78,7 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 			seed_t s;
 			s.qb = qb; s.qe = qe;
 			s.rb = rb; s.re = re;
+			s.sa_size = sa_size;
 			kv_push(seed_t, *mem_seeds, s);
 		}
 	}
@@ -99,16 +101,20 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 			seed_t s;
 			s.qb = qb; s.qe = qe;
 			s.rb = rb; s.re = re;
+			s.sa_size = sa_size;
 			kv_push(seed_t, *zip_seeds, s);
 		}
 	}
 	assert(p == bytes + sizeof(long));
 
-	int cnt = 0;
+	int non_rep_seeds = 0, cnt = 0;
 	for (i = 0; i < mem_seeds->n; i++) {
 		const seed_t *m = &mem_seeds->a[i];
+		if (m->sa_size > 150) continue; // Ignore the repetitive seeds
+		non_rep_seeds++;
 		for (j = 0; j < zip_seeds->n; j++) {
 			const seed_t *t = &zip_seeds->a[j];
+			if (t->sa_size > 150) continue;
 			if (t->qe <= m->qb) continue;
 			if (t->qb >= m->qe) break;
 			int que_ol = (t->qe < m->qe ?t->qe :m->qe) - (t->qb > m->qb ?t->qb :m->qb);
@@ -120,7 +126,7 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 			}
 		}
 	}
-	prof[t_id].mem_n += mem_seeds->n;
+	prof[t_id].mem_n += non_rep_seeds;
 	prof[t_id].hit_n += cnt;
 	free(zip_seeds->a); free(zip_seeds);
 	free(mem_seeds->a); free(mem_seeds);
@@ -157,7 +163,7 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 	} else if (step == 1) {
 		double rtime_s = realtime();
 		ktp_data_t *data = (ktp_data_t*)_data;
-		kt_for(24, worker, data, data->n_seqs);
+		kt_for(16, worker, data, data->n_seqs);
 		free(data->zip_seeds); free(data->mem_seeds);
 		aux->n_processed += data->n_seqs;
 		double rtime_e = realtime();
