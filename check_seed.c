@@ -174,7 +174,7 @@ void check_seeds(const char *zip_fn, const char *mem_fn) {
 	aux.mem_seeds = fopen(mem_fn, "rb"); assert(aux.mem_seeds != NULL);
 	aux.input_reads_bound = 1600 * 1000; // 160M bases for reads length of 100
 	memset(prof, 0, sizeof(prof));
-	kt_pipeline(1, tp_check_seeds, &aux, 2);
+	kt_pipeline(2, tp_check_seeds, &aux, 2);
 	int i;
 	for (i = 1; i < 256; i++) prof[0].mem_n += prof[i].mem_n;
 	for (i = 1; i < 256; i++) prof[0].hit_n += prof[i].hit_n;
