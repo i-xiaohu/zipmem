@@ -28,7 +28,7 @@ typedef struct {
 typedef struct {
 	long mem_n, hit_n;
 } prof_t;
-prof_t prof;
+prof_t prof[256];
 
 static uint8_t** load_seeds(int n_chunk_bound, FILE *f, int *n, long *size) {
 	int i;
@@ -56,49 +56,59 @@ typedef struct {
 } seed_t;
 typedef kvec_t(seed_t) seed_v;
 
-static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf) {
-	long p = 0;
+static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int t_id) {
+	long bytes, p;
 	int i, j, n;
-	seed_v mem_seeds; kv_init(mem_seeds);
-	seed_v zip_seeds; kv_init(zip_seeds);
-	n = *(int*)mem_buf + p; p += sizeof(int);
-	for (i = 0; i < n; i++) {
-		int qb = *(int*)mem_buf + p; p += sizeof(int);
-		int l = *(int*)mem_buf + p; p += sizeof(int);
-		int qe = qb + l;
-		long sa_size = *(long*)mem_buf + p; p += sizeof(long);
-		int occ = sa_size < 500 ? sa_size : 500;
-		for (j = 0; j < occ; j++) { // reference occurrence of mem seeds
-			long rb = *(long *)mem_buf + p; p += sizeof(long);
-			long re = rb + l;
-			seed_t s;
-			s.qb = qb; s.qe = qe;
-			s.rb = rb; s.re = re;
-			kv_push(seed_t, mem_seeds, s);
-		}
-	}
 
-	n = *(int*)zip_buf + p; p += sizeof(int);
+	seed_v *mem_seeds = calloc(1, sizeof(seed_v));
+	mem_seeds->n = 0;
+	p = 0;
+	bytes = *(long*)(mem_buf + p); p += sizeof(long);
+	n = *(int*)(mem_buf + p); p += sizeof(int);
 	for (i = 0; i < n; i++) {
-		int qb = *(int*)zip_buf + p; p += sizeof(int);
-		int l = *(int*)zip_buf + p; p += sizeof(int);
+		int qb = *(int*)(mem_buf + p); p += sizeof(int);
+		int l = *(int*)(mem_buf + p); p += sizeof(int);
 		int qe = qb + l;
-		long sa_size = *(long*)zip_buf + p; p += sizeof(long);
+		long sa_size = *(long*)(mem_buf + p); p += sizeof(long);
 		int occ = sa_size < 500 ? sa_size : 500;
 		for (j = 0; j < occ; j++) { // reference occurrence of mem seeds
-			long rb = *(long *)zip_buf + p; p += sizeof(long);
+			long rb = *(long*)(mem_buf + p); p += sizeof(long);
 			long re = rb + l;
 			seed_t s;
 			s.qb = qb; s.qe = qe;
 			s.rb = rb; s.re = re;
-			kv_push(seed_t, zip_seeds, s);
+			kv_push(seed_t, *mem_seeds, s);
 		}
 	}
+	assert(p == bytes + sizeof(long));
+
+	seed_v *zip_seeds = calloc(1, sizeof(seed_v));
+	zip_seeds->n = 0;
+	p = 0;
+	bytes = *(long*)(zip_buf + p); p += sizeof(long);
+	n = *(int*)(zip_buf + p); p += sizeof(int);
+	for (i = 0; i < n; i++) {
+		int qb = *(int*)(zip_buf + p); p += sizeof(int);
+		int l = *(int*)(zip_buf + p); p += sizeof(int);
+		int qe = qb + l;
+		long sa_size = *(long*)(zip_buf + p); p += sizeof(long);
+		int occ = sa_size < 500 ? sa_size : 500;
+		for (j = 0; j < occ; j++) { // reference occurrence of mem seeds
+			long rb = *(long*)(zip_buf + p); p += sizeof(long);
+			long re = rb + l;
+			seed_t s;
+			s.qb = qb; s.qe = qe;
+			s.rb = rb; s.re = re;
+			kv_push(seed_t, *zip_seeds, s);
+		}
+	}
+	assert(p == bytes + sizeof(long));
+
 	int cnt = 0;
-	for (i = 0; i < mem_seeds.n; i++) {
-		const seed_t *m = &mem_seeds.a[i];
-		for (j = 0; j < zip_seeds.n; j++) {
-			const seed_t *t = &zip_seeds.a[j];
+	for (i = 0; i < mem_seeds->n; i++) {
+		const seed_t *m = &mem_seeds->a[i];
+		for (j = 0; j < zip_seeds->n; j++) {
+			const seed_t *t = &zip_seeds->a[j];
 			if (t->qe <= m->qb) continue;
 			if (t->qb >= m->qe) break;
 			int que_ol = (t->qe < m->qe ?t->qe :m->qe) - (t->qb > m->qb ?t->qb :m->qb);
@@ -110,9 +120,17 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf) {
 			}
 		}
 	}
-	free(mem_seeds.a); free(zip_seeds.a);
-	prof.mem_n += mem_seeds.n;
-	prof.hit_n += cnt;
+	prof[t_id].mem_n += mem_seeds->n;
+	prof[t_id].hit_n += cnt;
+	free(zip_seeds->a); free(zip_seeds);
+	free(mem_seeds->a); free(mem_seeds);
+}
+
+static void worker(void *_data, long seq_id, int t_id) {
+	ktp_data_t *data = (ktp_data_t*)_data;
+	seed_consistency(data->mem_seeds[seq_id], data->zip_seeds[seq_id], t_id);
+	free(data->mem_seeds[seq_id]);
+	free(data->zip_seeds[seq_id]);
 }
 
 static void *tp_check_seeds(void *_aux, int step, void *_data) {
@@ -127,6 +145,8 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 		assert(n1 == n2);
 		ret->n_seqs = n1;
 		if (ret->n_seqs == 0) {
+			free(ret->zip_seeds);
+			free(ret->mem_seeds);
 			free(ret);
 			return 0;
 		}
@@ -137,18 +157,13 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 	} else if (step == 1) {
 		double rtime_s = realtime();
 		ktp_data_t *data = (ktp_data_t*)_data;
-		int i;
-		for (i = 0; i < data->n_seqs; i++) {
-			seed_consistency(data->mem_seeds[i], data->zip_seeds[i]);
-			free(data->zip_seeds[i]);
-			free(data->mem_seeds[i]);
-		}
+		kt_for(24, worker, data, data->n_seqs);
 		free(data->zip_seeds); free(data->mem_seeds);
 		aux->n_processed += data->n_seqs;
 		double rtime_e = realtime();
 		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
 		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
-		return data;
+		return 0;
 	}
 	return 0;
 }
@@ -158,81 +173,14 @@ void check_seeds(const char *zip_fn, const char *mem_fn) {
 	aux.zip_seeds = fopen(zip_fn, "rb"); assert(aux.zip_seeds != NULL);
 	aux.mem_seeds = fopen(mem_fn, "rb"); assert(aux.mem_seeds != NULL);
 	aux.input_reads_bound = 1600 * 1000; // 160M bases for reads length of 100
-	memset(&prof, 0, sizeof(prof));
-	kt_pipeline(2, tp_check_seeds, &aux, 2);
-	fprintf(stderr, "Seeds consistency: %.2f %% = %ld / %ld\n", 1.0*prof.hit_n/prof.mem_n, prof.hit_n, prof.mem_n);
+	memset(prof, 0, sizeof(prof));
+	kt_pipeline(1, tp_check_seeds, &aux, 2);
+	int i;
+	for (i = 1; i < 256; i++) prof[0].mem_n += prof[i].mem_n;
+	for (i = 1; i < 256; i++) prof[0].hit_n += prof[i].hit_n;
+	const prof_t *p = &prof[0];
+	fprintf(stderr, "Seeds consistency: %.2f %% = %ld / %ld\n", 100.0*p->hit_n/p->mem_n, p->hit_n, p->mem_n);
 	fclose(aux.zip_seeds); fclose(aux.mem_seeds);
-}
-
-void view_seeds(const char *idx_name, const char *fastq_fn, const char *seed_fn) {
-	bwaidx_t *idx = bwa_idx_load_from_disk(idx_name, BWA_IDX_ALL);
-	gzFile fp = gzopen(fastq_fn, "r");
-	kseq_t *ks = kseq_init(fp);
-	FILE *fseeds = fopen(seed_fn, "r");
-	long reads_n = 0;
-	long seeds_n = 0, no_mismatch = 0, mismatches_n = 0;
-	while (1) {
-		int i, j, k, h, n_seqs;
-		long size = 0;
-		bseq1_t *seqs = bseq_read(240 * 1000 * 1000, &n_seqs, ks, NULL);
-		if (seqs == NULL) break;
-		reads_n += n_seqs;
-		for (i = 0; i < n_seqs; ++i) size += seqs[i].l_seq;
-		long total_bytes = 0;
-		for (i = 0; i < n_seqs; i++) {
-			bseq1_t *read = &seqs[i];
-			for (j = 0; j < read->l_seq; j++) read->seq[j] = nst_nt4_table[read->seq[j]];
-			long seed_bytes = 0;
-			fread(&seed_bytes, sizeof(long), 1, fseeds);
-			total_bytes += seed_bytes;
-			uint8_t *seeds = malloc(seed_bytes);
-			fread(seeds, sizeof(uint8_t), seed_bytes, fseeds);
-			long pointer = 0;
-			int mem_n = *(int*)(seeds + pointer); pointer += sizeof(int);
-			for (j = 0; j < mem_n; j++) {
-				int sb = *(int*)(seeds + pointer); pointer += sizeof(int);
-				int sl = *(int*)(seeds + pointer); pointer += sizeof(int);
-				long sa_size = *(long*)(seeds + pointer); pointer += sizeof(long);
-				int true_occ = sa_size < 500 ?sa_size :500;
-				seeds_n += true_occ;
-				for (k = 0; k < true_occ; k++) {
-					long rb = *(long*)(seeds + pointer); pointer += sizeof(long);
-					int rid = bns_intv2rid(idx->bns, rb, rb + sl);
-					if (rid < 0) continue;
-					int64_t get_len = 0;
-					uint8_t *ref = bns_get_seq(idx->bns->l_pac, idx->pac, rb, rb + sl, &get_len);
-					if (get_len != sl) {
-						fprintf(stderr, "%d %ld\n", sl, get_len);
-					}
-					assert(get_len == sl);
-					int mis = 0;
-					for (h = 0; h < sl; h++) {
-						if (read->seq[sb + h] != ref[h]) mis++;
-					}
-					free(ref);
-					if (!mis) no_mismatch++;
-					else mismatches_n += mis;
-				}
-			}
-			if (pointer != seed_bytes) {
-				fprintf(stderr, "%ld %ld\n", pointer, seed_bytes);
-			}
-			assert(pointer == seed_bytes);
-			free(seeds);
-			free(read->name); free(read->comment); free(read->seq); free(read->qual);
-		}
-		free(seqs);
-		fprintf(stderr, "[%s] Processed %d reads (%ld Mbp) and %ld MB seeds\n",
-		        __func__, n_seqs, (long)size/1000/1000, total_bytes/1024/1024);
-	}
-	bwa_idx_destroy(idx);
-	kseq_destroy(ks);
-	gzclose(fp);
-	fclose(fseeds);
-	fprintf(stderr, "reads number\t%ld\n", reads_n);
-	fprintf(stderr, "seeds number\t%.2f\n", 1.0 * seeds_n / reads_n);
-	fprintf(stderr, "Exactly matched seeds\t%.2f\n", 100.0 * no_mismatch / seeds_n);
-	fprintf(stderr, "Mismatched number of noisy seeds\t%.2f\n", 1.0 * mismatches_n / (seeds_n-no_mismatch));
 }
 
 typedef struct {
@@ -405,7 +353,6 @@ static int usage() {
 int main(int argc, char *argv[]) {
 	if (argc == 1) return usage();
 	if (!strcmp(argv[1], "seed") && argc == 4) check_seeds(argv[2], argv[3]);
-	else if (!strcmp(argv[1], "2seed") && argc == 5) view_seeds(argv[2], argv[3], argv[4]);
 	else if (!strcmp(argv[1], "sam") && argc == 4) check_sam(argv[2], argv[3]);
 	else return usage();
 	return 0;
