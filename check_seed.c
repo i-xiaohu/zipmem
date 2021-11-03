@@ -13,9 +13,27 @@
 KSEQ_DECLARE(gzFile)
 
 typedef struct {
+	char *qname;
+	int flag;
+	char *rname;
+	int pos;
+	int mapq;
+	char *cigar;
+	char *rnext;
+	int pnext;  // position of next read
+	int tlen;   // inferred insert size
+	char *seq;
+	char *qual;
+	// Options
+	int nm;
+	int as;
+	char *data; // All fields are allocated in one memory chunk.
+} sam_line_t;
+
+typedef struct {
 	int input_reads_bound;
 	FILE *zip_seeds, *mem_seeds;
-	FILE *zip_sam, *mem_sam;
+	gzFile zip_sam, mem_sam;
 	int64_t n_processed;
 } ktp_aux_t;
 
@@ -23,10 +41,12 @@ typedef struct {
 	ktp_aux_t *aux;
 	int n_seqs;
 	uint8_t **zip_seeds, **mem_seeds;
+	sam_line_t *zip_sam, *mem_sam;
 } ktp_data_t;
 
 typedef struct {
-	long mem_n, hit_n;
+	long mem_seed_n, hit_seed_n;
+	long mem_align_n, hit_p_n, hit_nm_n, hit_mq_n; // Only primary alignments with MAPQ>3 of BWA-MEM are considered
 } prof_t;
 prof_t prof[256];
 
@@ -115,8 +135,7 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 		for (j = 0; j < zip_seeds->n; j++) {
 			const seed_t *t = &zip_seeds->a[j];
 			if (t->sa_size > 150) continue;
-			if (t->qe <= m->qb) continue;
-			if (t->qb >= m->qe) break;
+			if (t->qe <= m->qb || t->qb >= m->qe) continue;
 			int que_ol = (t->qe < m->qe ?t->qe :m->qe) - (t->qb > m->qb ?t->qb :m->qb);
 			int ref_ol = (t->re < m->re ?t->re :m->re) - (t->rb > m->rb ?t->rb :m->rb);
 			int min_l  = (t->qe - t->qb < m->qe - m->qb) ?(t->qe - t->qb) :(m->qe - m->qb);
@@ -126,13 +145,13 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 			}
 		}
 	}
-	prof[t_id].mem_n += non_rep_seeds;
-	prof[t_id].hit_n += cnt;
+	prof[t_id].mem_seed_n += non_rep_seeds;
+	prof[t_id].hit_seed_n += cnt;
 	free(zip_seeds->a); free(zip_seeds);
 	free(mem_seeds->a); free(mem_seeds);
 }
 
-static void worker(void *_data, long seq_id, int t_id) {
+static void worker1(void *_data, long seq_id, int t_id) {
 	ktp_data_t *data = (ktp_data_t*)_data;
 	seed_consistency(data->mem_seeds[seq_id], data->zip_seeds[seq_id], t_id);
 	free(data->mem_seeds[seq_id]);
@@ -163,12 +182,13 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 	} else if (step == 1) {
 		double rtime_s = realtime();
 		ktp_data_t *data = (ktp_data_t*)_data;
-		kt_for(16, worker, data, data->n_seqs);
+		kt_for(16, worker1, data, data->n_seqs);
 		free(data->zip_seeds); free(data->mem_seeds);
 		aux->n_processed += data->n_seqs;
 		double rtime_e = realtime();
 		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
 		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
+		free(data);
 		return 0;
 	}
 	return 0;
@@ -182,30 +202,42 @@ void check_seeds(const char *zip_fn, const char *mem_fn) {
 	memset(prof, 0, sizeof(prof));
 	kt_pipeline(2, tp_check_seeds, &aux, 2);
 	int i;
-	for (i = 1; i < 256; i++) prof[0].mem_n += prof[i].mem_n;
-	for (i = 1; i < 256; i++) prof[0].hit_n += prof[i].hit_n;
+	for (i = 1; i < 256; i++) prof[0].mem_seed_n += prof[i].mem_seed_n;
+	for (i = 1; i < 256; i++) prof[0].hit_seed_n += prof[i].hit_seed_n;
 	const prof_t *p = &prof[0];
-	fprintf(stderr, "Seeds consistency: %.2f %% = %ld / %ld\n", 100.0*p->hit_n/p->mem_n, p->hit_n, p->mem_n);
+	fprintf(stderr, "Seeds consistency: %.2f %% = %ld / %ld\n", 100.0 * p->hit_seed_n / p->mem_seed_n, p->hit_seed_n, p->mem_seed_n);
 	fclose(aux.zip_seeds); fclose(aux.mem_seeds);
 }
 
-typedef struct {
-	char *qname;
-	int flag;
-	char *rname;
-	int pos;
-	int mapq;
-	char *cigar;
-	char *rnext;
-	int pnext;  // position of next read
-	int tlen;   // inferred insert size
-	char *seq;
-	char *qual;
-	// Options
-	int nm;
-	int as;
-	char *data; // All fields are allocated in one memory chunk.
-} sam_line_t;
+/************************
+ * Check for alignment  *
+ ************************/
+
+#define SAMF_MUL_SEG    0x1   // template having multiple segments in sequencing
+#define SAMF_BOTH_ALI   0x2   // each segment properly aligned according to the aligner
+#define SAMF_UNMAP      0x4   // segment unmapped
+#define SAMF_NEXT_UNMAP 0x8   // next segment in the template unmapped
+#define SAMF_RC         0x10  // SEQ being reverse complemented
+#define SAMF_NEXT_RC    0x20  // SEQ of the next segment in the template being reverse complemented
+#define SAMF_READ1      0x40  // the first segment in the template
+#define SAMF_READ2      0x80  // the last segment in the template
+#define SAMF_SEC_ALI    0x100 // secondary alignment, multiple mapping
+#define SAMF_N0_FLT     0x200 // not passing filters, such as platform/vendor quality controls
+#define SAMF_PCR        0x400 // PCR or optical duplicate
+#define SAMF_SUP_ALI    0x800 // supplementary alignment, chimeric alignment
+
+static inline int mul_seg(int flag) { return ((flag & SAMF_MUL_SEG) != 0); }
+static inline int both_ali(int flag) { return ((flag & SAMF_BOTH_ALI) != 0); }
+static inline int unmap(int flag) { return ((flag & SAMF_UNMAP) != 0); }
+static inline int next_unmap(int flag) { return ((flag & SAMF_NEXT_UNMAP) != 0); }
+static inline int is_rc(int flag) { return ((flag & SAMF_RC) != 0); }
+static inline int next_rc(int flag) { return ((flag & SAMF_NEXT_RC) != 0); }
+static inline int is_read1(int flag) { return ((flag & SAMF_READ1) != 0); }
+static inline int is_read2(int flag) { return ((flag & SAMF_READ2) != 0); }
+static inline int sec_ali(int flag) { return ((flag & SAMF_SEC_ALI) != 0); }
+static inline int no_flt(int flag) { return ((flag & SAMF_N0_FLT) != 0); }
+static inline int pcr(int flag) { return ((flag & SAMF_PCR) != 0); }
+static inline int sup_ali(int flag) { return ((flag & SAMF_SUP_ALI) != 0); }
 
 static sam_line_t fetch_samline1(gzFile f) {
 	char line[65536];
@@ -259,91 +291,98 @@ static sam_line_t fetch_samline1(gzFile f) {
 	return sam;
 }
 
-static void output_sam(const sam_line_t *s) {
+static sam_line_t* load_sam(int n_chunk_bound, gzFile f, int *n) {
 	int i;
-	fprintf(stderr, "QName: %s\n", s->qname);
-	fprintf(stderr, "Flag:  ");
-	for (i = 11; i >= 0; i--)
-		if (s->flag & (1<<i)) fprintf(stderr, "1");
-		else fprintf(stderr, "0");
-	fprintf(stderr, "\n");
-	fprintf(stderr, "RName: %s\n", s->rname);
-	fprintf(stderr, "Pos:   %d\n", s->pos);
-	fprintf(stderr, "MapQ:  %d\n", s->mapq);
-	fprintf(stderr, "CIGAR: %s\n", s->cigar);
-	fprintf(stderr, "SEQ:   %s\n", s->seq);
-	fprintf(stderr, "NM:    %d\n", s->nm);
-	fprintf(stderr, "AS:    %d\n", s->as);
-	fprintf(stderr, "\n");
-}
-
-#define SAMF_MUL_SEG    0x1   // template having multiple segments in sequencing
-#define SAMF_BOTH_ALI   0x2   // each segment properly aligned according to the aligner
-#define SAMF_UNMAP      0x4   // segment unmapped
-#define SAMF_NEXT_UNMAP 0x8   // next segment in the template unmapped
-#define SAMF_RC         0x10  // SEQ being reverse complemented
-#define SAMF_NEXT_RC    0x20  // SEQ of the next segment in the template being reverse complemented
-#define SAMF_READ1      0x40  // the first segment in the template
-#define SAMF_READ2      0x80  // the last segment in the template
-#define SAMF_SEC_ALI    0x100 // secondary alignment, multiple mapping
-#define SAMF_N0_FLT     0x200 // not passing filters, such as platform/vendor quality controls
-#define SAMF_PCR        0x400 // PCR or optical duplicate
-#define SAMF_SUP_ALI    0x800 // supplementary alignment, chimeric alignment
-
-static inline int mul_seg(int flag) { return ((flag & SAMF_MUL_SEG) != 0); }
-static inline int both_ali(int flag) { return ((flag & SAMF_BOTH_ALI) != 0); }
-static inline int unmap(int flag) { return ((flag & SAMF_UNMAP) != 0); }
-static inline int next_unmap(int flag) { return ((flag & SAMF_NEXT_UNMAP) != 0); }
-static inline int is_rc(int flag) { return ((flag & SAMF_RC) != 0); }
-static inline int next_rc(int flag) { return ((flag & SAMF_NEXT_RC) != 0); }
-static inline int is_read1(int flag) { return ((flag & SAMF_READ1) != 0); }
-static inline int is_read2(int flag) { return ((flag & SAMF_READ2) != 0); }
-static inline int sec_ali(int flag) { return ((flag & SAMF_SEC_ALI) != 0); }
-static inline int no_flt(int flag) { return ((flag & SAMF_N0_FLT) != 0); }
-static inline int pcr(int flag) { return ((flag & SAMF_PCR) != 0); }
-static inline int sup_ali(int flag) { return ((flag & SAMF_SUP_ALI) != 0); }
-
-void check_sam(const char *zip_fn, const char *mem_fn) {
-	gzFile fzip = gzopen(zip_fn, "r"); assert(fzip != NULL);
-	gzFile fmem = gzopen(mem_fn, "r"); assert(fmem != NULL);
-	// Only consider primary alignments
-	long pos_eq = 0, primary_n = 0;
-	long as_eq = 0;
-	long nm_eq = 0;
-	while (1) {
-		sam_line_t zip_sam = fetch_samline1(fzip);
-		if (gzeof(fzip)) break;
-		if (zip_sam.data == NULL) continue;
-		if (sec_ali(zip_sam.flag) || sup_ali(zip_sam.flag)) {
-			free(zip_sam.data);
-			continue;
-		}
-		sam_line_t mem_sam;
-		while (1) {
-			mem_sam = fetch_samline1(fmem);
-			if (gzeof(fmem)) break;
-			if (mem_sam.data == NULL) continue;
-			if (sec_ali(mem_sam.flag) || sup_ali(mem_sam.flag)) {
-				free(mem_sam.data);
-				continue;
-			}
+	*n = n_chunk_bound;
+	sam_line_t *sam = malloc(n_chunk_bound * sizeof(sam_line_t));
+	for (i = 0; i < n_chunk_bound; i++) {
+		sam_line_t zip_sam = fetch_samline1(f);
+		if (gzeof(f)) {
+			*n = i;
 			break;
 		}
-		if (gzeof(fmem)) break;
-		assert(strcmp(zip_sam.qname, mem_sam.qname) == 0);
-		primary_n++;
-		if (!strcmp(zip_sam.rname, mem_sam.rname) && zip_sam.pos == mem_sam.pos) {
-			pos_eq++;
+		if (zip_sam.data == NULL) {
+			i--;
+			continue;
 		}
-		if (zip_sam.as == mem_sam.as) as_eq++;
-		if (zip_sam.nm == mem_sam.nm) nm_eq++;
-		free(zip_sam.data); free(mem_sam.data);
+		if (sec_ali(zip_sam.flag) || sup_ali(zip_sam.flag)) {
+			free(zip_sam.data);
+			i--;
+			continue;
+		}
+		sam[i] = zip_sam;
 	}
-	gzclose(fzip); gzclose(fmem);
-	fprintf(stderr, "Primary: %ld\n", primary_n);
-	fprintf(stderr, "POS:\t%.2f %% = %ld / #pri\n", 100.0 * pos_eq / primary_n, pos_eq);
-	fprintf(stderr, "AS: \t%.2f %% = %ld / #pri\n", 100.0 * as_eq / primary_n, as_eq);
-	fprintf(stderr, "NM: \t%.2f %% = %ld / #pri\n", 100.0 * nm_eq / primary_n, nm_eq);
+	if (*n == 0) {
+		free(sam);
+		return 0;
+	}
+	return sam;
+}
+
+static void* tp_check_sam(void *_aux, int step, void *_data) {
+	ktp_aux_t *aux = (ktp_aux_t*)_aux;
+	if (step == 0) {
+		double rtime_s = realtime();
+		ktp_data_t *data = calloc(1, sizeof(ktp_data_t));
+		int n1, n2;
+		data->zip_sam = load_sam(aux->input_reads_bound, aux->zip_sam, &n1);
+		data->mem_sam = load_sam(aux->input_reads_bound, aux->mem_sam, &n2);
+		assert(n1 == n2);
+		data->n_seqs = n1;
+		if (data->n_seqs == 0) {
+			free(data);
+			return 0;
+		}
+		double rtime_e = realtime();
+		fprintf(stderr, "[%s_step1] Input %d bwamem and zipmem primary alignments in %.1f real sec\n",
+		        __func__, data->n_seqs, rtime_e-rtime_s);
+		return data;
+	} else if (step == 1) {
+		double rtime_s = realtime();
+		int i;
+		ktp_data_t *data = (ktp_data_t*)_data;
+		for (i = 0; i < data->n_seqs; i++) {
+			const sam_line_t *m = &data->mem_sam[i];
+			const sam_line_t *z = &data->zip_sam[i];
+			assert(!strcmp(m->qname, z->qname));
+			if (m->mapq <= 3) continue;
+			prof[0].mem_align_n++;
+			if (!strcmp(z->rname, m->rname) && abs(z->pos - m->pos) <= 5) {
+				prof[0].hit_p_n++;
+			}
+			if (z->nm == m->nm) prof[0].hit_nm_n++;
+			if (abs(z->mapq - m->mapq) <= 5) prof[0].hit_mq_n++;
+			free(z->data); free(m->data);
+		}
+		free(data->zip_sam); free(data->mem_sam);
+		aux->n_processed += data->n_seqs;
+		double rtime_e = realtime();
+		fprintf(stderr, "[%s_step2] Check alignments in %.1f real sec, have processed %ld reads in total\n",
+		        __func__, rtime_e-rtime_s, aux->n_processed);
+		return 0;
+	}
+	return 0;
+}
+
+void check_sam(const char *zip_fn, const char *mem_fn) {
+	ktp_aux_t aux; memset(&aux, 0, sizeof(aux));
+	aux.zip_sam = gzopen(zip_fn, "r"); assert(aux.zip_sam != NULL);
+	aux.mem_sam = gzopen(mem_fn, "r"); assert(aux.mem_sam != NULL);
+	aux.input_reads_bound = 1600 * 1000;
+	memset(prof, 0, sizeof(prof));
+	kt_pipeline(2, tp_check_sam, &aux, 2);
+	gzclose(aux.zip_sam); gzclose(aux.mem_sam);
+
+	int i;
+	for (i = 1; i < 256; i++) prof[0].mem_align_n += prof[i].mem_align_n;
+	for (i = 1; i < 256; i++) prof[0].hit_p_n += prof[i].hit_p_n;
+	for (i = 1; i < 256; i++) prof[0].hit_nm_n += prof[i].hit_nm_n;
+	for (i = 1; i < 256; i++) prof[0].hit_mq_n += prof[i].hit_mq_n;
+	const prof_t *p = &prof[0];
+	fprintf(stderr, "Primary: %ld\n", p->mem_align_n);
+	fprintf(stderr, "POS:     %ld\n", p->hit_p_n);
+	fprintf(stderr, "NM:      %ld\n", p->hit_nm_n);
+	fprintf(stderr, "MAPQ     %ld\n", p->hit_mq_n);
 }
 
 static int usage() {
