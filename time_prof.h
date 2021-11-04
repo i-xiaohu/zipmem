@@ -20,7 +20,6 @@ typedef struct {
 	double t_csseed[2];
 	double t_supseed[2];
 	double t_seeding[2];
-	double t_extending[2];
 } zsmem_prof_t;
 
 typedef struct {
