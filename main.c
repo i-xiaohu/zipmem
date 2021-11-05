@@ -8,7 +8,7 @@
 #include "zipmem.h"
 #include "read_input.h"
 
-#define ZIPMEM_VERSION "5.2-dirty"
+#define ZIPMEM_VERSION "5.2-ram"
 
 KSEQ_DECLARE(gzFile)
 

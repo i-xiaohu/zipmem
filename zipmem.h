@@ -10,7 +10,7 @@
 typedef struct {
 	int n; // consensus sequence length
 	uint8_t *s; // consensus sequence
-	int *cnt[4]; // Saving votes.
+	uint8_t *cnt[4]; // Saving votes.
 	uint8_t *seeds; // CS seeds
 } con_seq_t;
 
@@ -22,7 +22,7 @@ typedef struct {
 // Allocated memory for all CS.
 typedef struct {
 	uint8_t *s; // CS bases
-	int *cnt[4]; // counts of A,C,G,T in CS
+	uint8_t *cnt[4]; // counts of A,C,G,T in CS
 	int *mem_loc; // memory location for initializing CS
 	int *offset; // offset on CS of all reads
 	uint8_t *is_rc; // if reads are reversed/complement in CS
