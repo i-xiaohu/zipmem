@@ -8,7 +8,7 @@
 #include "zipmem.h"
 #include "read_input.h"
 
-#define ZIPMEM_VERSION "5.2-ram"
+#define ZIPMEM_VERSION "5.2-io"
 
 KSEQ_DECLARE(gzFile)
 
@@ -30,8 +30,43 @@ typedef struct {
 	ktp_aux_t *aux;
 	int n_seqs;
 	bseq1_t *seqs;
+	zip_worker_t *w;
 	uint8_t **seeds;
 } ktp_data_t;
+
+// Bytes for reused seeds returned
+static long output_reused_seeds(const mem_opt_t *opt, const bwt_t *bwt, const con_seq_t *cs, uint8_t is_rc, int cs_os, int len) {
+	long pointer = 0, bytes_n = 0;
+	int i, j, csmem_n = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
+	for (i = 0; i < csmem_n; i++) {
+		int sb = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
+		if (sb >= cs_os + len) break;
+		int se = sb + *(int*)(cs->seeds + pointer); pointer += sizeof(int);
+		long sa_size = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
+		int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
+		// Drag the MEM down to read
+		int l_clip = sb < cs_os ?cs_os - sb :0;
+		int r_clip = se > cs_os+len ?se-cs_os-len :0;
+		int down_sb = sb - cs_os + l_clip;
+		int down_l = se - sb - l_clip - r_clip;
+		if (se <= cs_os || down_l < opt->min_seed_len) {
+			pointer += true_occ * sizeof(long);
+			continue;
+		}
+		down_sb = is_rc ?len-down_sb-down_l :down_sb;
+		fwrite(&down_sb, sizeof(int), 1, stdout);
+		fwrite(&down_l, sizeof(int), 1, stdout);
+		fwrite(&sa_size, sizeof(long), 1, stdout);
+		for (j = 0; j < true_occ; j++) {
+			long loc = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
+			loc += l_clip;
+			loc = is_rc ?bwt->seq_len-loc-down_l :loc;
+			fwrite(&loc, sizeof(long), 1, stdout);
+		}
+		bytes_n += sizeof(int) + sizeof(int) + sizeof(long) + true_occ * sizeof(long);
+	}
+	return bytes_n;
+}
 
 // Three steps of pipeline for seeding: input reads, seeding, output seeds.
 static void *tp_seeding(void *shared, int step, void *_data) {
@@ -65,7 +100,7 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 		double ctime_s = cputime(), rtime_s = realtime();
 		const mem_opt_t *opt = aux->opt;
 		const bwaidx_t *idx = aux->idx;
-		zipmem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
+		data->w = zipmem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		aux->n_processed += data->n_seqs;
 		double ctime_e = cputime(), rtime_e = realtime();
 		if (bwa_verbose >= 3)
@@ -75,15 +110,31 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 		return data;
 	} else if (step == 2) {
 		double rtime_s = realtime();
-		for (i = 0; i < data->n_seqs; ++i) {
+		zip_worker_t *w = data->w;
+		for (i = 0; i < data->n_seqs; i++) {
 			// sam here is used to stores the seeds and the preceding number indicating memory cost.
-			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
-			fwrite(data->seqs[i].sam, sizeof(uint8_t), bytes, stdout);
-			free(data->seqs[i].sam);
-			free(data->seqs[i].name); free(data->seqs[i].comment);
-			free(data->seqs[i].seq); free(data->seqs[i].qual);
+			bseq1_t *read = &data->seqs[i];
+			uint8_t *seeds = (uint8_t*)read->sam;
+			long p = 0;
+			long bytes = *(long*)(seeds + p) + sizeof(long); p += sizeof(long);
+			fwrite(&bytes, sizeof(long), 1, stdout);
+			int mems_n = *(int*)(seeds + p); p += sizeof(int);
+			fwrite(&mems_n, sizeof(int), 1, stdout);
+			const con_seq_t *cs = &w->csv.a[w->cs_aux->belong_to[i]];
+			uint8_t is_rc = w->cs_aux->is_rc[i];
+			int cs_os = w->cs_aux->offset[i];
+			int reuse_bytes = output_reused_seeds(w->opt, w->bwt, cs, is_rc, cs_os, read->l_seq);
+			fwrite(seeds + p, sizeof(uint8_t), bytes - p - reuse_bytes, stdout);
+			free(read->sam);
+			free(read->name); free(read->comment);
+			free(read->seq); free(read->qual);
 		}
-		free(data->seqs); free(data);
+		cs_aux_destroy(w->cs_aux);
+		for (i = 0; i < w->csv.n; i++) free(w->csv.a[i].seeds);
+		free(w->csv.a);
+		free(w);
+		free(data->seqs);
+		free(data);
 		double rtime_e = realtime();
 		if (bwa_verbose >= 3)
 			fprintf(stderr, "[%s_step3] Output seeds in %.1f real sec, %ld reads have been processed\n",

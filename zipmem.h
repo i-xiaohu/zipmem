@@ -29,6 +29,19 @@ typedef struct {
 	int *belong_to; // which CS the read belongs to
 } cs_aux_t;
 
+typedef struct {size_t n, m; int *a;} int_v;
+
+typedef struct {
+	const mem_opt_t *opt;
+	const bwt_t *bwt;
+	int n;
+	bseq1_t *seqs;
+	smem_aux_t **mem_aux;
+	cs_aux_t *cs_aux;
+	con_seq_v csv;
+	int_v *misbuf;
+} zip_worker_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,7 +59,7 @@ extern "C" {
 	 * @param n Reads number
 	 * @param seqs Reordered reads
 	 */
-	void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs);
+	zip_worker_t * zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs);
 
 #ifdef __cplusplus
 }

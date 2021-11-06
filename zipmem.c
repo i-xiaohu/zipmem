@@ -14,8 +14,6 @@
 
 extern zsmem_prof_t zmp;
 
-typedef kvec_t(int) int_v;
-
 cs_aux_t* cs_aux_init(int n, const bseq1_t *reads) {
 	// For 160M bases, ~820M bytes needed.
 	cs_aux_t *a;
@@ -49,17 +47,6 @@ void cs_aux_destroy(cs_aux_t *a)  {
 	free(a->belong_to);
 	free(a);
 }
-
-typedef struct {
-	const mem_opt_t *opt;
-	const bwt_t *bwt;
-	int n;
-	bseq1_t *seqs;
-	smem_aux_t **mem_aux;
-	cs_aux_t *cs_aux;
-	con_seq_v csv;
-	int_v *misbuf;
-} worker_t;
 
 static inline void reverse_complement(int len, uint8_t *bases) {
 	int i;
@@ -260,7 +247,7 @@ static uint8_t* mem_sal(const mem_opt_t  *opt, const bwt_t *bwt, const bwtintv_v
 }
 
 static void cs_seeding_worker(void *data, long cs_id, int t_id) {
-	worker_t *w = (worker_t*)data;
+	zip_worker_t *w = (zip_worker_t *)data;
 	con_seq_t *cs = &w->csv.a[cs_id];
 	const bwt_t *bwt = w->bwt;
 	const mem_opt_t *opt = w->opt;
@@ -276,7 +263,7 @@ static inline int intv_len(const bwtintv_t *p) {
 }
 
 static void sup_seeding_worker(void *data, long seq_id, int t_id) {
-	worker_t *w = (worker_t*)data;
+	zip_worker_t *w = (zip_worker_t *)data;
 	const bwt_t *bwt = w->bwt;
 
 	const mem_opt_t *opt = w->opt;
@@ -286,60 +273,28 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	int cs_os = w->cs_aux->offset[seq_id];
 	const con_seq_t *cs = &w->csv.a[cs_id];
 	uint8_t is_rc = w->cs_aux->is_rc[seq_id];
-	long total_occ = 0;
 
-	// Reusing preparation
-	long pointer = 0, bytes_n = 0;
+	// Calculating the reused memory
+	long pointer = 0, reuse_bytes = 0;
 	int csmem_n = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
+	int reuse_n = 0;
+	long total_occ = 0;
 	for (i = 0; i < csmem_n; i++) {
-		long mem_beg = pointer;
 		int sb = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
 		if (sb >= cs_os + len) break;
 		int se = sb + *(int*)(cs->seeds + pointer); pointer += sizeof(int);
 		long sa_size = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
-		pointer += ((sa_size < opt->max_occ) ?sa_size :opt->max_occ) * sizeof(long);
-		long mem_end = pointer;
-		if (se <= cs_os) continue;
-		bytes_n += mem_end - mem_beg;
+		int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
+		pointer += true_occ * sizeof(long);
+		int l_clip = sb < cs_os ?cs_os - sb :0;
+		int r_clip = se > cs_os+len ?se-cs_os-len :0;
+		int down_l = se - sb - l_clip - r_clip;
+		if (se <= cs_os || down_l < opt->min_seed_len) continue;
+		reuse_n++;
+		total_occ += true_occ;
+		reuse_bytes += sizeof(int) + sizeof(int) + sizeof(long) + true_occ * sizeof(long);
 	}
-
-	long p2 = 0;
-	uint8_t *reused_mem = malloc(bytes_n * sizeof(uint8_t));
-	int reused_n = 0;
-	if (bytes_n > 0) {
-		// Reusing CS seeds
-		pointer = sizeof(int);
-		for (i = 0; i < csmem_n; i++) {
-			int sb = *(int*)(cs->seeds + pointer); pointer += sizeof(int);
-			if (sb >= cs_os + len) break;
-			int se = sb + *(int*)(cs->seeds + pointer); pointer += sizeof(int);
-			long sa_size = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
-			int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
-			// Drag the MEM down to read
-			int l_clip = sb < cs_os ?cs_os - sb :0;
-			int r_clip = se > cs_os+len ?se-cs_os-len :0;
-			int down_sb = sb - cs_os + l_clip;
-			int down_l = se - sb - l_clip - r_clip;
-			if (se <= cs_os || down_l < opt->min_seed_len) {
-				pointer += true_occ * sizeof(long);
-				continue;
-			}
-			down_sb = is_rc ?len-down_sb-down_l :down_sb;
-			reused_n++;
-			zmp.reused_n[t_id] += true_occ;
-			*(int*)(reused_mem + p2) = down_sb; p2 += sizeof(int);
-			*(int*)(reused_mem + p2) = down_l; p2 += sizeof(int);
-			*(long*)(reused_mem + p2) = sa_size; p2 += sizeof(long);
-			total_occ += true_occ;
-			for (j = 0; j < true_occ; j++) {
-				long loc = *(long*)(cs->seeds + pointer); pointer += sizeof(long);
-				loc += l_clip;
-				loc = is_rc ?bwt->seq_len-loc-down_l :loc;
-				*(long*)(reused_mem + p2) = loc; p2 += sizeof(long);
-			}
-		}
-	}
-	long reused_bytes = p2;
+	zmp.reused_n[t_id] += total_occ;
 
 	// Supplementary seeding
 	long skip_bound = total_occ > 200 ?20 :200; // Memory protection
@@ -395,68 +350,34 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	}
 	sup_vram[t_id] += sup_bytes;
 
-	// Push the reused mems into sup mems array
-	p2 = 0;
-	for (i = 0; i < reused_n; i++) {
-		bwtintv_t temp;
-		temp.x[2] = 0; // Use x[2]=0 to mark reused mem
-		temp.x[0] = p2; // x[2] is used to record corresponding pointer
-		int sb = *(int*)(reused_mem + p2); p2 += sizeof(int);
-		int se = sb + *(int*)(reused_mem + p2); p2 += sizeof(int);
-		long sa_size = *(long*)(reused_mem + p2); p2 += sizeof(long);
-		int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
-		p2 += true_occ * sizeof(long);
-		temp.info = ((long)sb << 32) | se;
-		kv_push(bwtintv_t, a->mem, temp);
-	}
-
-	// Sort the sup and reused mems together
-	ks_introsort_mem_intv(a->mem.n, a->mem.a);
-
-	long total_bytes = sizeof(long) + sizeof(int) + sup_bytes + reused_bytes;
-	read->sam = malloc(total_bytes);
+	read->sam = malloc(sizeof(long) + sizeof(int) + sup_bytes);
 	long p3 = 0;
 	p3 += sizeof(long); // Skip #bytes
 	p3 += sizeof(int); // Skip #mems
 	for (i = 0; i < a->mem.n; i++) {
 		const bwtintv_t *p = &a->mem.a[i];
-		if (p->x[2] == 0) {
-			p2 = p->x[0];
-			int sb = *(int*)(reused_mem + p2); p2 += sizeof(int);
-			int se = sb + *(int*)(reused_mem + p2); p2 += sizeof(int);
-			long sa_size = *(long*)(reused_mem + p2);
-			int true_occ = sa_size < opt->max_occ ?sa_size :opt->max_occ;
-			long move_bytes = sizeof(int) + sizeof(int) + sizeof(long) + sizeof(long) * true_occ;
-			memcpy(read->sam + p3, reused_mem + p->x[0], move_bytes);
-			p3 += move_bytes;
-			assert(sb == p->info >> 32);
-			assert(se == (int)p->info);
-		} else {
-			int count, qb = p->info>>32;
-			int slen = (uint32_t)p->info - qb;
-			qb = is_rc ?len-qb-slen :qb;
-			*(int*)(read->sam + p3) = qb; p3 += sizeof(int);
-			*(int*)(read->sam + p3) = slen; p3 += sizeof(int);
-			*(long*)(read->sam + p3) = p->x[2]; p3 += sizeof(long);
-			int64_t k, step;
-			step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
-			for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
-				int64_t rb = bwt_sa(bwt, p->x[0] + k);
-				rb = is_rc ?bwt->seq_len-rb-slen :rb;
-				*(long*)(read->sam + p3) = rb; p3 += sizeof(long);
-			}
+		int count, qb = p->info>>32;
+		int slen = (uint32_t)p->info - qb;
+		qb = is_rc ?len-qb-slen :qb;
+		*(int*)(read->sam + p3) = qb; p3 += sizeof(int);
+		*(int*)(read->sam + p3) = slen; p3 += sizeof(int);
+		*(long*)(read->sam + p3) = p->x[2]; p3 += sizeof(long);
+		int64_t k, step;
+		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
+		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
+			int64_t rb = bwt_sa(bwt, p->x[0] + k);
+			rb = is_rc ?bwt->seq_len-rb-slen :rb;
+			*(long*)(read->sam + p3) = rb; p3 += sizeof(long);
 		}
 	}
-	*(long*)read->sam = total_bytes - sizeof(long);
-	*(int*)(read->sam + sizeof(long)) = a->mem.n;
-	assert(p3 == total_bytes);
-	read_vram[t_id] += total_bytes;
-	free(reused_mem);
+	*(long*)read->sam = sizeof(int) + reuse_bytes + sup_bytes;
+	*(int*)(read->sam + sizeof(long)) = a->mem.n + reuse_n;
+	assert(p3 == sizeof(long) + sizeof(int) + sup_bytes);
 	if (is_rc) reverse_complement(len, bases);
 }
 
-void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
-	worker_t w;
+zip_worker_t *zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
+	zip_worker_t w;
 	double ctime, rtime;
 	int i;
 
@@ -489,9 +410,9 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 	for (i = 0; i < opt->n_threads; i++) w.mem_aux[i] = smem_aux_init();
 	w.misbuf = calloc(opt->n_threads, sizeof(int_v));
 	kt_for(opt->n_threads, sup_seeding_worker, &w, n);
-	for (i = 0; i < w.csv.n; i++) free(w.csv.a[i].seeds);
-	cs_aux_destroy(w.cs_aux);
-	free(w.csv.a);
+//	for (i = 0; i < w.csv.n; i++) free(w.csv.a[i].seeds);
+//	cs_aux_destroy(w.cs_aux);
+//	free(w.csv.a);
 	for (i = 0; i < opt->n_threads; i++) { smem_aux_destroy(w.mem_aux[i]); } free(w.mem_aux);
 	for (i = 0; i < opt->n_threads; i++) { free(w.misbuf[i].a); } free(w.misbuf);
 	double supseed_c = cputime(), supseed_r = realtime();
@@ -504,4 +425,8 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 	zmp.cs_vram = zmp.cs_vram > cs_vram[0] ?zmp.cs_vram :cs_vram[0];
 	zmp.read_vram = zmp.read_vram > read_vram[0] ?zmp.read_vram :read_vram[0];
 	zmp.sup_vram = zmp.sup_vram > sup_vram[0] ?zmp.sup_vram :sup_vram[0];
+
+	zip_worker_t *ret = malloc(sizeof(zip_worker_t));
+	*ret = w;
+	return ret;
 }
