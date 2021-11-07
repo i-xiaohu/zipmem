@@ -46,7 +46,11 @@ typedef struct {
 
 typedef struct {
 	long mem_seed_n, hit_seed_n;
-	long mem_align_n, hit_p_n, hit_nm_n, hit_mq_n; // Only primary alignments with MAPQ>3 of BWA-MEM are considered
+	long mem_align_q3, hit_p_q3, hit_nm_q3;
+	long mem_align_q10, hit_p_q10, hit_nm_q10;
+	long mem_align_q20, hit_p_q20, hit_nm_q20;
+	long mem_align_q30, hit_p_q30, hit_nm_q30;
+	long mem_align_q40, hit_p_q40, hit_nm_q40;
 } prof_t;
 prof_t prof[256];
 
@@ -130,7 +134,7 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 	int non_rep_seeds = 0, cnt = 0;
 	for (i = 0; i < mem_seeds->n; i++) {
 		const seed_t *m = &mem_seeds->a[i];
-		if (m->sa_size > 150) continue; // Ignore the repetitive seeds
+		if (m->sa_size > 100) continue; // Ignore the repetitive seeds
 		non_rep_seeds++;
 		for (j = 0; j < zip_seeds->n; j++) {
 			const seed_t *t = &zip_seeds->a[j];
@@ -139,7 +143,7 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 			int que_ol = (t->qe < m->qe ?t->qe :m->qe) - (t->qb > m->qb ?t->qb :m->qb);
 			int ref_ol = (t->re < m->re ?t->re :m->re) - (t->rb > m->rb ?t->rb :m->rb);
 			int min_l  = (t->qe - t->qb < m->qe - m->qb) ?(t->qe - t->qb) :(m->qe - m->qb);
-			if (que_ol >= (int)(min_l * 0.75 + 0.499) && ref_ol >= (int)(min_l * 0.75 + 0.499)) {
+			if (que_ol >= (int)(min_l * 0.80 + 0.499) && ref_ol >= (int)(min_l * 0.80 + 0.499)) {
 				cnt++;
 				break;
 			}
@@ -176,51 +180,18 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 			return 0;
 		}
 		double rtime_e = realtime();
-		fprintf(stderr, "[%s_step1] Input %ld bytes zip seeds %ld bytes mem seeds in %.1f real sec\n",
-		  __func__, zip_size, mem_size, rtime_e-rtime_s);
+		fprintf(stderr, "[%s_step1] Input %ldM zip seeds %ldM mem seeds in %.1f real sec\n",
+		  __func__, zip_size/1000/1000, mem_size/1000/1000, rtime_e-rtime_s);
 		return ret;
 	} else if (step == 1) {
 		double rtime_s = realtime();
 		ktp_data_t *data = (ktp_data_t*)_data;
-		int i, j;
-		long mem_substring = 0, zip_substring = 0;
-		long mem_occ = 0, zip_occ = 0;
-		for (i = 0; i < data->n_seqs; i++) {
-			uint8_t *m = data->mem_seeds[i];
-			long p = sizeof(long);
-			int mem_n = *(int*)(m + p); p += sizeof(int);
-			mem_substring += mem_n;
-			for (j = 0; j < mem_n; j++) {
-				p += sizeof(int);
-				p += sizeof(int);
-				long sa_size = *(long*)(m + p); p += sizeof(long);
-				int occ = sa_size < 500 ? sa_size : 500;
-				p += occ * sizeof(long);
-				mem_occ += occ;
-			}
-			free(m);
-
-			uint8_t *z = data->zip_seeds[i];
-			p = sizeof(long);
-			int zip_n = *(int*)(z + p); p += sizeof(int);
-			zip_substring += zip_n;
-			for (j = 0; j < zip_n; j++) {
-				p += sizeof(int);
-				p += sizeof(int);
-				long sa_size = *(long*)(z + p); p += sizeof(long);
-				int occ = sa_size < 500 ? sa_size : 500;
-				p += occ * sizeof(long);
-				zip_occ += occ;
-			}
-			free(z);
-		}
-		fprintf(stderr, "%ld %ld %ld %ld\n", mem_substring, zip_substring, mem_occ, zip_occ);
-//		kt_for(16, worker1, data, data->n_seqs);
+		kt_for(16, worker1, data, data->n_seqs);
 		free(data->zip_seeds); free(data->mem_seeds);
 		aux->n_processed += data->n_seqs;
 		double rtime_e = realtime();
-//		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
-//		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
+		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
+		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
 		free(data);
 		return 0;
 	}
@@ -238,7 +209,7 @@ void check_seeds(const char *zip_fn, const char *mem_fn) {
 	for (i = 1; i < 256; i++) prof[0].mem_seed_n += prof[i].mem_seed_n;
 	for (i = 1; i < 256; i++) prof[0].hit_seed_n += prof[i].hit_seed_n;
 	const prof_t *p = &prof[0];
-	fprintf(stderr, "Seeds consistency: %.2f %% = %ld / %ld\n", 100.0 * p->hit_seed_n / p->mem_seed_n, p->hit_seed_n, p->mem_seed_n);
+	fprintf(stderr, "Seeds consistency: %.4f %% = %ld / %ld\n", 100.0 * p->hit_seed_n / p->mem_seed_n, p->hit_seed_n, p->mem_seed_n);
 	fclose(aux.zip_seeds); fclose(aux.mem_seeds);
 }
 
@@ -378,13 +349,34 @@ static void* tp_check_sam(void *_aux, int step, void *_data) {
 			const sam_line_t *m = &data->mem_sam[i];
 			const sam_line_t *z = &data->zip_sam[i];
 			assert(!strcmp(m->qname, z->qname));
-			if (m->mapq <= 3) continue;
-			prof[0].mem_align_n++;
-			if (!strcmp(z->rname, m->rname) && abs(z->pos - m->pos) <= 5) {
-				prof[0].hit_p_n++;
+			prof_t *p = &prof[0];
+			int pos_true = (!strcmp(z->rname, m->rname)) && (abs(z->pos - m->pos) <= 5);
+			int nm_true = z->nm == m->nm;
+			if (m->mapq > 3) {
+				p->mem_align_q3++;
+				p->hit_p_q3 += pos_true;
+				p->hit_nm_q3 += nm_true;
 			}
-			if (z->nm == m->nm) prof[0].hit_nm_n++;
-			if (abs(z->mapq - m->mapq) <= 5) prof[0].hit_mq_n++;
+			if (m->mapq > 10) {
+				p->mem_align_q10++;
+				p->hit_p_q10 += pos_true;
+				p->hit_nm_q10 += nm_true;
+			}
+			if (m->mapq > 20) {
+				p->mem_align_q20++;
+				p->hit_p_q20 += pos_true;
+				p->hit_nm_q20 += nm_true;
+			}
+			if (m->mapq > 30) {
+				p->mem_align_q30++;
+				p->hit_p_q30 += pos_true;
+				p->hit_nm_q30 += nm_true;
+			}
+			if (m->mapq > 40) {
+				p->mem_align_q40++;
+				p->hit_p_q40 += pos_true;
+				p->hit_nm_q40 += nm_true;
+			}
 			free(z->data); free(m->data);
 		}
 		free(data->zip_sam); free(data->mem_sam);
@@ -406,16 +398,22 @@ void check_sam(const char *zip_fn, const char *mem_fn) {
 	kt_pipeline(2, tp_check_sam, &aux, 2);
 	gzclose(aux.zip_sam); gzclose(aux.mem_sam);
 
-	int i;
-	for (i = 1; i < 256; i++) prof[0].mem_align_n += prof[i].mem_align_n;
-	for (i = 1; i < 256; i++) prof[0].hit_p_n += prof[i].hit_p_n;
-	for (i = 1; i < 256; i++) prof[0].hit_nm_n += prof[i].hit_nm_n;
-	for (i = 1; i < 256; i++) prof[0].hit_mq_n += prof[i].hit_mq_n;
 	const prof_t *p = &prof[0];
-	fprintf(stderr, "Primary: %ld\n", p->mem_align_n);
-	fprintf(stderr, "POS:     %ld\n", p->hit_p_n);
-	fprintf(stderr, "NM:      %ld\n", p->hit_nm_n);
-	fprintf(stderr, "MAPQ     %ld\n", p->hit_mq_n);
+	fprintf(stderr, "Primary for Q3:  %ld\n", p->mem_align_q3);
+	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q3, 100.0 * p->hit_p_q3 / p->mem_align_q3);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q3, 100.0 * p->hit_nm_q3 / p->mem_align_q3);
+	fprintf(stderr, "Primary for Q10: %ld\n", p->mem_align_q10);
+	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q10, 100.0 * p->hit_p_q10 / p->mem_align_q10);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q10, 100.0 * p->hit_nm_q10 / p->mem_align_q10);
+	fprintf(stderr, "Primary for Q20: %ld\n", p->mem_align_q20);
+	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q20, 100.0 * p->hit_p_q20 / p->mem_align_q20);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q20, 100.0 * p->hit_nm_q20 / p->mem_align_q20);
+	fprintf(stderr, "Primary for Q30: %ld\n", p->mem_align_q30);
+	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q30, 100.0 * p->hit_p_q30 / p->mem_align_q30);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q30, 100.0 * p->hit_nm_q30 / p->mem_align_q30);
+	fprintf(stderr, "Primary for Q40: %ld\n", p->mem_align_q40);
+	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q40, 100.0 * p->hit_p_q40 / p->mem_align_q40);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q40, 100.0 * p->hit_nm_q40 / p->mem_align_q40);
 }
 
 static int usage() {
