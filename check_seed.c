@@ -176,18 +176,51 @@ static void *tp_check_seeds(void *_aux, int step, void *_data) {
 			return 0;
 		}
 		double rtime_e = realtime();
-		fprintf(stderr, "[%s_step1] Input %ldM zip seeds %ldM mem seeds in %.1f real sec\n",
-		  __func__, zip_size/1000/1000, mem_size/1000/1000, rtime_e-rtime_s);
+		fprintf(stderr, "[%s_step1] Input %ld bytes zip seeds %ld bytes mem seeds in %.1f real sec\n",
+		  __func__, zip_size, mem_size, rtime_e-rtime_s);
 		return ret;
 	} else if (step == 1) {
 		double rtime_s = realtime();
 		ktp_data_t *data = (ktp_data_t*)_data;
-		kt_for(16, worker1, data, data->n_seqs);
+		int i, j;
+		long mem_substring = 0, zip_substring = 0;
+		long mem_occ = 0, zip_occ = 0;
+		for (i = 0; i < data->n_seqs; i++) {
+			uint8_t *m = data->mem_seeds[i];
+			long p = sizeof(long);
+			int mem_n = *(int*)(m + p); p += sizeof(int);
+			mem_substring += mem_n;
+			for (j = 0; j < mem_n; j++) {
+				p += sizeof(int);
+				p += sizeof(int);
+				long sa_size = *(long*)(m + p); p += sizeof(long);
+				int occ = sa_size < 500 ? sa_size : 500;
+				p += occ * sizeof(long);
+				mem_occ += occ;
+			}
+			free(m);
+
+			uint8_t *z = data->zip_seeds[i];
+			p = sizeof(long);
+			int zip_n = *(int*)(z + p); p += sizeof(int);
+			zip_substring += zip_n;
+			for (j = 0; j < zip_n; j++) {
+				p += sizeof(int);
+				p += sizeof(int);
+				long sa_size = *(long*)(z + p); p += sizeof(long);
+				int occ = sa_size < 500 ? sa_size : 500;
+				p += occ * sizeof(long);
+				zip_occ += occ;
+			}
+			free(z);
+		}
+		fprintf(stderr, "%ld %ld %ld %ld\n", mem_substring, zip_substring, mem_occ, zip_occ);
+//		kt_for(16, worker1, data, data->n_seqs);
 		free(data->zip_seeds); free(data->mem_seeds);
 		aux->n_processed += data->n_seqs;
 		double rtime_e = realtime();
-		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
-		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
+//		fprintf(stderr, "[%s_step2] Check seeds for %d reads in %.1f real sec, have processed %ld reads in total\n",
+//		        __func__, data->n_seqs, rtime_e-rtime_s, aux->n_processed);
 		free(data);
 		return 0;
 	}
