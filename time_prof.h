@@ -17,10 +17,6 @@ typedef struct {
 	double t_csseed[2];
 	double t_supseed[2];
 	double t_seeding[2];
-	// RAM
-	size_t cs_vram;
-	size_t read_vram;
-	size_t sup_vram;
 } zsmem_prof_t;
 
 typedef struct {
@@ -46,9 +42,6 @@ static void zsmem_prof_output(zsmem_prof_t *a) {
 	fprintf(stderr, "Mismatches number   \t%.2f\n", 1.0*a->mis_n[0]/a->reads_n);
 	fprintf(stderr, "Reused seeds        \t%.2f\n", 1.0*a->reused_n[0]/a->reads_n);
 	fprintf(stderr, "Supplementary seeds \t%.2f\n", 1.0*a->sup_n[0]/a->reads_n);
-	fprintf(stderr, "CS VRAM             \t%ld\n", a->cs_vram);
-	fprintf(stderr, "Read VRAM           \t%ld\n", a->read_vram);
-	fprintf(stderr, "Sup VRAM            \t%ld\n", a->sup_vram);
 }
 
 #endif //ZIP_SEEDING_5_9_TIME_PROF_H
