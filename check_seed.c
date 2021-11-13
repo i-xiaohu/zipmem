@@ -9,26 +9,9 @@
 #include "bwalib/bwa.h"
 #include "bwalib/kseq.h"
 #include "bwalib/utils.h"
+#include "samop.h"
 
 KSEQ_DECLARE(gzFile)
-
-typedef struct {
-	char *qname;
-	int flag;
-	char *rname;
-	int pos;
-	int mapq;
-	char *cigar;
-	char *rnext;
-	int pnext;  // position of next read
-	int tlen;   // inferred insert size
-	char *seq;
-	char *qual;
-	// Options
-	int nm;
-	int as;
-	char *data; // All fields are allocated in one memory chunk.
-} sam_line_t;
 
 typedef struct {
 	int input_reads_bound;
@@ -216,84 +199,6 @@ void check_seeds(const char *zip_fn, const char *mem_fn) {
 /************************
  * Check for alignment  *
  ************************/
-
-#define SAMF_MUL_SEG    0x1   // template having multiple segments in sequencing
-#define SAMF_BOTH_ALI   0x2   // each segment properly aligned according to the aligner
-#define SAMF_UNMAP      0x4   // segment unmapped
-#define SAMF_NEXT_UNMAP 0x8   // next segment in the template unmapped
-#define SAMF_RC         0x10  // SEQ being reverse complemented
-#define SAMF_NEXT_RC    0x20  // SEQ of the next segment in the template being reverse complemented
-#define SAMF_READ1      0x40  // the first segment in the template
-#define SAMF_READ2      0x80  // the last segment in the template
-#define SAMF_SEC_ALI    0x100 // secondary alignment, multiple mapping
-#define SAMF_N0_FLT     0x200 // not passing filters, such as platform/vendor quality controls
-#define SAMF_PCR        0x400 // PCR or optical duplicate
-#define SAMF_SUP_ALI    0x800 // supplementary alignment, chimeric alignment
-
-static inline int mul_seg(int flag) { return ((flag & SAMF_MUL_SEG) != 0); }
-static inline int both_ali(int flag) { return ((flag & SAMF_BOTH_ALI) != 0); }
-static inline int unmap(int flag) { return ((flag & SAMF_UNMAP) != 0); }
-static inline int next_unmap(int flag) { return ((flag & SAMF_NEXT_UNMAP) != 0); }
-static inline int is_rc(int flag) { return ((flag & SAMF_RC) != 0); }
-static inline int next_rc(int flag) { return ((flag & SAMF_NEXT_RC) != 0); }
-static inline int is_read1(int flag) { return ((flag & SAMF_READ1) != 0); }
-static inline int is_read2(int flag) { return ((flag & SAMF_READ2) != 0); }
-static inline int sec_ali(int flag) { return ((flag & SAMF_SEC_ALI) != 0); }
-static inline int no_flt(int flag) { return ((flag & SAMF_N0_FLT) != 0); }
-static inline int pcr(int flag) { return ((flag & SAMF_PCR) != 0); }
-static inline int sup_ali(int flag) { return ((flag & SAMF_SUP_ALI) != 0); }
-
-static sam_line_t fetch_samline1(gzFile f) {
-	char line[65536];
-	sam_line_t sam; memset(&sam, 0, sizeof(sam));
-	if (gzgets(f, line, sizeof(line)) == NULL) return sam;
-	int len = (int)strlen(line);
-	if(line[len-1] == '\n') { line[--len] = '\0'; }
-	if (line[0] == '@') return sam; // Skip SAM header
-
-	sam.data = strdup(line);
-	int i, cnt_d = 0;
-	for(i = 0; i < len; ++i) {
-		if(sam.data[i] == '\t') {
-			sam.data[i] = '\0';
-		}
-	}
-	for(i = 0; i < len; ++i) {
-		if(i == 0 || sam.data[i-1] == '\0') {
-			if(cnt_d == 0) {
-				sam.qname = sam.data + i;
-			} else if(cnt_d == 1) {
-				sam.flag = strtol(sam.data + i, NULL, 10);
-			} else if(cnt_d == 2) {
-				sam.rname = sam.data + i;
-			} else if(cnt_d == 3) {
-				sam.pos = strtol(sam.data + i, NULL, 10);
-			} else if(cnt_d == 4) {
-				sam.mapq = strtol(sam.data + i, NULL, 10);
-			} else if(cnt_d == 5) {
-				sam.cigar = sam.data + i;
-			} else if(cnt_d == 6) {
-				sam.rnext = sam.data + i;
-			} else if(cnt_d == 7) {
-				sam.pnext = strtol(sam.data + i, NULL, 10);
-			} else if(cnt_d == 8) {
-				sam.tlen = strtol(sam.data + i, NULL, 10);
-			} else if(cnt_d == 9) {
-				sam.seq = sam.data + i;
-			} else if(cnt_d == 10) {
-				sam.qual = sam.data + i;
-			} else if (sam.data[i] == 'A' && sam.data[i+1] == 'S') {
-				sam.as = strtol(sam.data + i + 5, NULL, 10);
-			} else if (sam.data[i] == 'N' && sam.data[i+1] == 'M') {
-				sam.nm = strtol(sam.data + i + 5, NULL, 10);
-			}
-		}
-		if(sam.data[i] == '\0') {
-			++cnt_d;
-		}
-	}
-	return sam;
-}
 
 static sam_line_t* load_sam(int n_chunk_bound, gzFile f, int *n) {
 	int i;
