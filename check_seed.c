@@ -29,11 +29,11 @@ typedef struct {
 
 typedef struct {
 	long mem_seed_n, hit_seed_n;
-	long mem_align_q3, hit_p_q3, hit_nm_q3;
-	long mem_align_q10, hit_p_q10, hit_nm_q10;
-	long mem_align_q20, hit_p_q20, hit_nm_q20;
-	long mem_align_q30, hit_p_q30, hit_nm_q30;
-	long mem_align_q40, hit_p_q40, hit_nm_q40;
+	long mem_align_q3, no_clip_q3, hit_p_q3, hit_nm_q3;
+	long mem_align_q10, no_clip_q10, hit_p_q10, hit_nm_q10;
+	long mem_align_q20, no_clip_q20, hit_p_q20, hit_nm_q20;
+	long mem_align_q30, no_clip_q30, hit_p_q30, hit_nm_q30;
+	long mem_align_q40, no_clip_q40, hit_p_q40, hit_nm_q40;
 } prof_t;
 prof_t prof[256];
 
@@ -228,6 +228,37 @@ static sam_line_t* load_sam(int n_chunk_bound, gzFile f, int *n) {
 	return sam;
 }
 
+static inline int clip_len(const char *cigar, int ask_left) {
+	int i, temp = 0, len = strlen(cigar);
+	if (ask_left) {
+		for (i = 0; i < len; i++) {
+			if (cigar[i] >= '0' && cigar[i] <= '9') {
+				temp *= 10;
+				temp += cigar[i] - '0';
+			} else if (cigar[i] == 'S') {
+				return temp;
+			} else return 0; // No left clipping
+		}
+	} else {
+		if (cigar[len-1] != 'S') return 0; // No right clipping
+		for (i = len-2; i >= 0; i--) if (cigar[i] < '0' || cigar[i] > '9') break;
+		for (i = i+1; i < len-1; i++) {
+			temp *= 10;
+			temp += cigar[i] - '0';
+		}
+		return temp;
+	}
+	assert(temp == 0);
+	return temp;
+}
+
+static inline int pos_is_consistent(const sam_line_t *m ,const sam_line_t *z) {
+	if (strcmp(z->rname, m->rname) != 0) return 0;
+	int pos1 = m->pos - clip_len(m->cigar, 1);
+	int pos2 = z->pos - clip_len(z->cigar, 1);
+	return abs(pos1 - pos2) <= 5;
+}
+
 static void* tp_check_sam(void *_aux, int step, void *_data) {
 	ktp_aux_t *aux = (ktp_aux_t*)_aux;
 	if (step == 0) {
@@ -255,32 +286,49 @@ static void* tp_check_sam(void *_aux, int step, void *_data) {
 			const sam_line_t *z = &data->zip_sam[i];
 			assert(!strcmp(m->qname, z->qname));
 			prof_t *p = &prof[0];
-			int pos_true = (!strcmp(z->rname, m->rname)) && (abs(z->pos - m->pos) <= 5);
-			int nm_true = z->nm == m->nm;
+			int pos_true = pos_is_consistent(m, z);
+			int mem_clip = clip_len(m->cigar, 0) + clip_len(m->cigar, 1);
+			int zip_clip = clip_len(z->cigar, 0) + clip_len(z->cigar, 1);
+			int nm_true = z->nm <= m->nm;
 			if (m->mapq > 3) {
 				p->mem_align_q3++;
 				p->hit_p_q3 += pos_true;
-				p->hit_nm_q3 += nm_true;
+				if (mem_clip == 0 && zip_clip == 0) {
+					p->no_clip_q3++;
+					p->hit_nm_q3 += nm_true;
+				}
 			}
 			if (m->mapq > 10) {
 				p->mem_align_q10++;
 				p->hit_p_q10 += pos_true;
-				p->hit_nm_q10 += nm_true;
+				if (mem_clip == 0 && zip_clip == 0) {
+					p->no_clip_q10++;
+					p->hit_nm_q10 += nm_true;
+				}
 			}
 			if (m->mapq > 20) {
 				p->mem_align_q20++;
 				p->hit_p_q20 += pos_true;
-				p->hit_nm_q20 += nm_true;
+				if (mem_clip == 0 && zip_clip == 0) {
+					p->no_clip_q20++;
+					p->hit_nm_q20 += nm_true;
+				}
 			}
 			if (m->mapq > 30) {
 				p->mem_align_q30++;
 				p->hit_p_q30 += pos_true;
-				p->hit_nm_q30 += nm_true;
+				if (mem_clip == 0 && zip_clip == 0) {
+					p->no_clip_q30++;
+					p->hit_nm_q30 += nm_true;
+				}
 			}
 			if (m->mapq > 40) {
 				p->mem_align_q40++;
 				p->hit_p_q40 += pos_true;
-				p->hit_nm_q40 += nm_true;
+				if (mem_clip == 0 && zip_clip == 0) {
+					p->no_clip_q40++;
+					p->hit_nm_q40 += nm_true;
+				}
 			}
 			free(z->data); free(m->data);
 		}
@@ -306,19 +354,19 @@ void check_sam(const char *zip_fn, const char *mem_fn) {
 	const prof_t *p = &prof[0];
 	fprintf(stderr, "Primary for Q3:  %ld\n", p->mem_align_q3);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q3, 100.0 * p->hit_p_q3 / p->mem_align_q3);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q3, 100.0 * p->hit_nm_q3 / p->mem_align_q3);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q3, 100.0 * p->hit_nm_q3 / p->no_clip_q3);
 	fprintf(stderr, "Primary for Q10: %ld\n", p->mem_align_q10);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q10, 100.0 * p->hit_p_q10 / p->mem_align_q10);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q10, 100.0 * p->hit_nm_q10 / p->mem_align_q10);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q10, 100.0 * p->hit_nm_q10 / p->no_clip_q10);
 	fprintf(stderr, "Primary for Q20: %ld\n", p->mem_align_q20);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q20, 100.0 * p->hit_p_q20 / p->mem_align_q20);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q20, 100.0 * p->hit_nm_q20 / p->mem_align_q20);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q20, 100.0 * p->hit_nm_q20 / p->no_clip_q20);
 	fprintf(stderr, "Primary for Q30: %ld\n", p->mem_align_q30);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q30, 100.0 * p->hit_p_q30 / p->mem_align_q30);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q30, 100.0 * p->hit_nm_q30 / p->mem_align_q30);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q30, 100.0 * p->hit_nm_q30 / p->no_clip_q30);
 	fprintf(stderr, "Primary for Q40: %ld\n", p->mem_align_q40);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q40, 100.0 * p->hit_p_q40 / p->mem_align_q40);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q40, 100.0 * p->hit_nm_q40 / p->mem_align_q40);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q40, 100.0 * p->hit_nm_q40 / p->no_clip_q40);
 }
 
 static int usage() {
