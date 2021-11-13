@@ -136,7 +136,7 @@ static con_seq_v connect_reads(int threads_n, worker_t *w) {
 }
 
 // Look up SA for occurrence location on reference of MEMs.
-static uint8_t* mem_sal(const mem_opt_t  *opt, const bwt_t *bwt, const bwtintv_v *mems, int t_id) {
+static uint8_t* mem_sal(const mem_opt_t  *opt, const bwt_t *bwt, const bwtintv_v *mems) {
 	int i, cnt = 0;
 	long bytes_n = sizeof(int);
 	int occ_bound = 50; // We further restrict the repetitive level of CS seeds
@@ -169,62 +169,55 @@ static uint8_t* mem_sal(const mem_opt_t  *opt, const bwt_t *bwt, const bwtintv_v
 	return seeds;
 }
 
-static void cs_seeding_worker(void *data, long cs_id, int t_id) {
-	worker_t *w = (worker_t*)data;
-	con_seq_t *cs = &w->csv.a[cs_id];
-	const bwt_t *bwt = w->bwt;
-	const mem_opt_t *opt = w->opt;
-	smem_aux_t *aux = w->mem_aux[t_id];
+static void cs_seeding(const mem_opt_t *opt, const bwt_t *bwt, con_seq_t *cs, const bseq1_t *reads,
+					   int *offset, uint8_t *is_rc, smem_aux_t *aux) {
 	int l = cs->l, r = cs->r;
-	const bseq1_t *reads = w->seqs;
-
 	// Preparing
 	int i, j, ml = 0, mr = reads[l].l_seq, p = 0;
 	char dir = 'F'; // Assume the first read on F direction
-	w->offset[l] = 0; w->is_rc[l] = 0; w->belong_to[l] = cs_id;
+	offset[l] = 0; is_rc[l] = 0;
 	for (i = l+1; i < r; i++) {
-		w->belong_to[i] = cs_id;
-		if (w->offset[i] == -1) break;
-		if (w->is_rc[i] == 1) { // FF
+		if (offset[i] == -1) break;
+		if (is_rc[i] == 1) { // FF
 			if (dir == 'F') {
-				p = p + w->offset[i];
+				p = p + offset[i];
 				dir = 'F';
 			} else {
-				p = p - w->offset[i];
+				p = p - offset[i];
 				dir = 'R';
 			}
-		} else if (w->is_rc[i] == 2) { // FR
+		} else if (is_rc[i] == 2) { // FR
 			if (dir == 'F') {
-				p = p + w->offset[i];
+				p = p + offset[i];
 				dir = 'R';
 			} else {
-				p = p - w->offset[i];
+				p = p - offset[i];
 				dir = 'F';
 			}
-		} else if (w->is_rc[i] == 3) { // RF
+		} else if (is_rc[i] == 3) { // RF
 			if (dir == 'R') {
-				p = p + w->offset[i];
+				p = p + offset[i];
 				dir = 'F';
 			} else {
-				p = p - w->offset[i];
+				p = p - offset[i];
 				dir = 'R';
 			}
 		} else { // RR
 			if (dir == 'R') {
-				p = p + w->offset[i];
+				p = p + offset[i];
 				dir = 'R';
 			} else {
-				p = p - w->offset[i];
+				p = p - offset[i];
 				dir = 'F';
 			}
 		}
-		w->offset[i] = p;
-		w->is_rc[i] = dir == 'F' ?0 :1;
+		offset[i] = p;
+		is_rc[i] = dir == 'F' ?0 :1;
 		ml = ml < p ?ml :p;
 		mr = mr > p + reads[i].l_seq ?mr :p + reads[i].l_seq;
 	}
 	cs->n = mr - ml;
-	for (i = l; i < r; i++) w->offset[i] -= ml;
+	for (i = l; i < r; i++) offset[i] -= ml;
 
 	// Voting
 	int16_t *cnt[4];
@@ -232,10 +225,10 @@ static void cs_seeding_worker(void *data, long cs_id, int t_id) {
 	for (i = l; i < r; i++) {
 		const bseq1_t *b = &reads[i];
 		for (j = 0; j < b->l_seq; j++) b->seq[j] = (uint8_t)nst_nt4_table[b->seq[j]];
-		if (w->is_rc[i]) reverse_complement(b->l_seq, b->seq);
+		if (is_rc[i]) reverse_complement(b->l_seq, b->seq);
 		for (j = 0; j < b->l_seq; j++) {
 			uint8_t c = b->seq[j];
-			if (c < 4) cnt[c][w->offset[i]+j]++; // 'N' does not vote
+			if (c < 4) cnt[c][offset[i]+j]++; // 'N' does not vote
 		}
 	}
 	cs->s = malloc(cs->n * sizeof(uint8_t));
@@ -251,34 +244,18 @@ static void cs_seeding_worker(void *data, long cs_id, int t_id) {
 	}
 	for (i = 0; i < 4; i++) free(cnt[i]);
 
-	zmp.cs_bases += cs->n;
-	for (i = l; i < r; i++) {
-		const bseq1_t *b = &reads[i];
-		for (j = 0; j < b->l_seq; j++) {
-			if (b->seq[j] != cs->s[w->offset[i] + j]) zmp.mis_n[t_id]++;
-		}
-	}
-
 	// BWA-MEM seeding on CS.
 	mem_collect_intv(opt, bwt, cs->n, cs->s, aux);
-	cs->seeds = mem_sal(opt, bwt, &aux->mem, t_id);
+	cs->seeds = mem_sal(opt, bwt, &aux->mem);
 }
 
 static inline int intv_len(const bwtintv_t *p) {
 	return (int)p->info - (p->info>>32);
 }
 
-static void sup_seeding_worker(void *data, long seq_id, int t_id) {
-	worker_t *w = (worker_t*)data;
-	const bwt_t *bwt = w->bwt;
-
-	const mem_opt_t *opt = w->opt;
-	bseq1_t *read = &w->seqs[seq_id];
+static void reuse_and_supplement(const mem_opt_t *opt, const bwt_t *bwt, const con_seq_t *cs,
+								 bseq1_t *read, int cs_os, uint8_t is_rc, smem_aux_t *a, int t_id) {
 	int i, j, len = read->l_seq;
-	int cs_id = w->belong_to[seq_id];
-	int cs_os = w->offset[seq_id];
-	const con_seq_t *cs = &w->csv.a[cs_id];
-	uint8_t is_rc = w->is_rc[seq_id];
 	long total_occ = 0;
 
 	// Reusing preparation
@@ -337,24 +314,17 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	}
 	assert(reuse_p == reused_bytes);
 
-	// Supplementary seeding
 	long skip_bound = total_occ > 200 ?20 :200; // Memory protection
 	uint8_t *bases = (uint8_t*)read->seq;
 
-	smem_aux_t *a = w->mem_aux[t_id]; a->mem.n = 0;
-	int_v *misbuf = &w->misbuf[t_id]; misbuf->n = 0;
-	for (i = 0; i < len; i++) {
-		if (bases[i] > 3) continue;
-		if (cs->s[cs_os + i] != bases[i]) {
-			kv_push(int, *misbuf, i);
-		}
-	}
-	zmp.mis_n[t_id] += misbuf->n;
+	// Supplementary seeding at each mismatched base
+	a->mem.n = 0;
 	int last_mem_end = -1;
-	for (i = 0; i < misbuf->n; i++) {
-		int x = misbuf->a[i];
-		if (x < last_mem_end) continue; // Skip the mismatch contained by previous mem
-		last_mem_end = bwt_smem1(bwt, len, bases, x, 1, &a->mem1, a->tmpv);
+	for (i = 0; i < len; i++) {
+		if (bases[i] == cs->s[cs_os + i] || bases[i] > 3) continue;
+		zmp.mis_n[t_id]++;
+		if (i < last_mem_end) continue; // Skip the mismatch contained by previous mem
+		last_mem_end = bwt_smem1(bwt, len, bases, i, 1, &a->mem1, a->tmpv);
 		for (j = 0; j < a->mem1.n; j++) {
 			const bwtintv_t *p = &a->mem1.a[j];
 			if (p->x[2] > skip_bound) continue;
@@ -446,6 +416,31 @@ static void sup_seeding_worker(void *data, long seq_id, int t_id) {
 	free(reused_mem);
 }
 
+static void seeding_worker(void *data, long cs_id, int t_id) {
+	worker_t *w = (worker_t*)data;
+	con_seq_t *cs = &w->csv.a[cs_id];
+	const bwt_t *bwt = w->bwt;
+	const mem_opt_t *opt = w->opt;
+	smem_aux_t *aux = w->mem_aux[t_id];
+	bseq1_t *reads = w->seqs;
+
+	cs_seeding(opt, bwt, cs, reads, w->offset, w->is_rc, aux);
+
+	int i, j;
+	zmp.cs_bases += cs->n;
+	for (i = cs->l; i < cs->r; i++) {
+		const bseq1_t *b = &reads[i];
+		for (j = 0; j < b->l_seq; j++) {
+			if (b->seq[j] != cs->s[w->offset[i] + j]) zmp.mis_n[t_id]++;
+		}
+	}
+
+	for (i = cs->l; i < cs->r; i++) {
+		reuse_and_supplement(opt, bwt, cs, &reads[i], w->offset[i], w->is_rc[i], aux, t_id);
+	}
+	free(cs->seeds); free(cs->s);
+}
+
 void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs) {
 	worker_t w;
 	double ctime, rtime;
@@ -463,25 +458,12 @@ void zipmem_seeding(const mem_opt_t *opt, const bwt_t *bwt, int n, bseq1_t *seqs
 	zmp.t_gencs[0] += gencs_c - ctime; zmp.t_gencs[1] += gencs_r - rtime;
 
 	/* Seeding on Consensus Sequences */
-	w.mem_aux = malloc(opt->n_threads * sizeof(smem_aux_t*));
-	for (i = 0; i < opt->n_threads; i++) w.mem_aux[i] = smem_aux_init();
-	kt_for(opt->n_threads, cs_seeding_worker, &w, w.csv.n);
-	for (i = 0; i < opt->n_threads; i++) { smem_aux_destroy(w.mem_aux[i]); } free(w.mem_aux);
-	double csseed_c = cputime(), csseed_r = realtime();
-	zmp.t_csseed[0] += csseed_c - gencs_c; zmp.t_csseed[1] += csseed_r - gencs_r;
-
 	/* Reusing and supplementary seeding */
 	w.mem_aux = malloc(opt->n_threads * sizeof(smem_aux_t*));
 	for (i = 0; i < opt->n_threads; i++) w.mem_aux[i] = smem_aux_init();
-	w.misbuf = calloc(opt->n_threads, sizeof(int_v));
-	kt_for(opt->n_threads, sup_seeding_worker, &w, n);
-	free(w.offset);
-	free(w.is_rc);
-	free(w.belong_to);
-	for (i = 0; i < w.csv.n; i++) { free(w.csv.a[i].seeds); free(w.csv.a[i].s); }
-	free(w.csv.a);
+	kt_for(opt->n_threads, seeding_worker, &w, w.csv.n);
 	for (i = 0; i < opt->n_threads; i++) { smem_aux_destroy(w.mem_aux[i]); } free(w.mem_aux);
-	for (i = 0; i < opt->n_threads; i++) { free(w.misbuf[i].a); } free(w.misbuf);
-	double supseed_c = cputime(), supseed_r = realtime();
-	zmp.t_supseed[0] += supseed_c - csseed_c; zmp.t_supseed[1] += supseed_r - csseed_r;
+	free(w.offset); free(w.is_rc); free(w.csv.a);
+	double csseed_c = cputime(), csseed_r = realtime();
+	zmp.t_csseed[0] += csseed_c - gencs_c; zmp.t_csseed[1] += csseed_r - gencs_r;
 }
