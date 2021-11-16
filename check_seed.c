@@ -29,11 +29,11 @@ typedef struct {
 
 typedef struct {
 	long mem_seed_n, hit_seed_n;
-	long mem_align_q3, no_clip_q3, hit_p_q3, hit_nm_q3;
-	long mem_align_q10, no_clip_q10, hit_p_q10, hit_nm_q10;
-	long mem_align_q20, no_clip_q20, hit_p_q20, hit_nm_q20;
-	long mem_align_q30, no_clip_q30, hit_p_q30, hit_nm_q30;
-	long mem_align_q40, no_clip_q40, hit_p_q40, hit_nm_q40;
+	long mem_align_q3, good_diff_q3, hit_p_q3, hit_nm_q3;
+	long mem_align_q10, good_diff_q10, hit_p_q10, hit_nm_q10;
+	long mem_align_q20, good_diff_q20, hit_p_q20, hit_nm_q20;
+	long mem_align_q30, good_diff_q30, hit_p_q30, hit_nm_q30;
+	long mem_align_q40, good_diff_q40, hit_p_q40, hit_nm_q40;
 } prof_t;
 prof_t prof[256];
 
@@ -117,11 +117,11 @@ static void seed_consistency(const uint8_t *mem_buf, const uint8_t *zip_buf, int
 	int non_rep_seeds = 0, cnt = 0;
 	for (i = 0; i < mem_seeds->n; i++) {
 		const seed_t *m = &mem_seeds->a[i];
-		if (m->sa_size > 100) continue; // Ignore the repetitive seeds
+//		if (m->sa_size > 100) continue; // Ignore the repetitive seeds
 		non_rep_seeds++;
 		for (j = 0; j < zip_seeds->n; j++) {
 			const seed_t *t = &zip_seeds->a[j];
-			if (t->sa_size > 150) continue;
+//			if (t->sa_size > 100) continue;
 			if (t->qe <= m->qb || t->qb >= m->qe) continue;
 			int que_ol = (t->qe < m->qe ?t->qe :m->qe) - (t->qb > m->qb ?t->qb :m->qb);
 			int ref_ol = (t->re < m->re ?t->re :m->re) - (t->rb > m->rb ?t->rb :m->rb);
@@ -293,41 +293,51 @@ static void* tp_check_sam(void *_aux, int step, void *_data) {
 			if (m->mapq > 3) {
 				p->mem_align_q3++;
 				p->hit_p_q3 += pos_true;
-				if (mem_clip == 0 && zip_clip == 0) {
-					p->no_clip_q3++;
-					p->hit_nm_q3 += nm_true;
+				if (pos_true || mem_clip || zip_clip) p->hit_nm_q3++;
+				else p->hit_nm_q3 += nm_true;
+				if (!pos_true) {
+					if (mem_clip == 0 && zip_clip == 0) p->good_diff_q3 += nm_true;
+					else p->good_diff_q3++;
 				}
 			}
 			if (m->mapq > 10) {
 				p->mem_align_q10++;
 				p->hit_p_q10 += pos_true;
-				if (mem_clip == 0 && zip_clip == 0) {
-					p->no_clip_q10++;
-					p->hit_nm_q10 += nm_true;
+				if (pos_true || mem_clip || zip_clip) p->hit_nm_q10++;
+				else p->hit_nm_q10 += nm_true;
+				if (!pos_true) {
+					if (mem_clip == 0 && zip_clip == 0) p->good_diff_q10 += nm_true;
+					else p->good_diff_q10++;
 				}
 			}
 			if (m->mapq > 20) {
 				p->mem_align_q20++;
 				p->hit_p_q20 += pos_true;
-				if (mem_clip == 0 && zip_clip == 0) {
-					p->no_clip_q20++;
-					p->hit_nm_q20 += nm_true;
+				if (pos_true || mem_clip || zip_clip) p->hit_nm_q20++;
+				else p->hit_nm_q20 += nm_true;
+				if (!pos_true) {
+					if (mem_clip == 0 && zip_clip == 0) p->good_diff_q20 += nm_true;
+					else p->good_diff_q20++;
 				}
 			}
 			if (m->mapq > 30) {
 				p->mem_align_q30++;
 				p->hit_p_q30 += pos_true;
-				if (mem_clip == 0 && zip_clip == 0) {
-					p->no_clip_q30++;
-					p->hit_nm_q30 += nm_true;
+				if (pos_true || mem_clip || zip_clip) p->hit_nm_q30++;
+				else p->hit_nm_q30 += nm_true;
+				if (!pos_true) {
+					if (mem_clip == 0 && zip_clip == 0) p->good_diff_q30 += nm_true;
+					else p->good_diff_q30++;
 				}
 			}
 			if (m->mapq > 40) {
 				p->mem_align_q40++;
 				p->hit_p_q40 += pos_true;
-				if (mem_clip == 0 && zip_clip == 0) {
-					p->no_clip_q40++;
-					p->hit_nm_q40 += nm_true;
+				if (pos_true || mem_clip || zip_clip) p->hit_nm_q40++;
+				else p->hit_nm_q40 += nm_true;
+				if (!pos_true) {
+					if (mem_clip == 0 && zip_clip == 0) p->good_diff_q40 += nm_true;
+					else p->good_diff_q40++;
 				}
 			}
 			free(z->data); free(m->data);
@@ -354,19 +364,24 @@ void check_sam(const char *zip_fn, const char *mem_fn) {
 	const prof_t *p = &prof[0];
 	fprintf(stderr, "Primary for Q3:  %ld\n", p->mem_align_q3);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q3, 100.0 * p->hit_p_q3 / p->mem_align_q3);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q3, 100.0 * p->hit_nm_q3 / p->no_clip_q3);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q3, 100.0 * p->hit_nm_q3 / p->mem_align_q3);
+	fprintf(stderr, "    Good Diff:   %ld\t%.4f [%%]\n", p->good_diff_q3, 100.0 * p->good_diff_q3 / (p->mem_align_q3 - p->hit_p_q3));
 	fprintf(stderr, "Primary for Q10: %ld\n", p->mem_align_q10);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q10, 100.0 * p->hit_p_q10 / p->mem_align_q10);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q10, 100.0 * p->hit_nm_q10 / p->no_clip_q10);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q10, 100.0 * p->hit_nm_q10 / p->mem_align_q10);
+	fprintf(stderr, "    Good Diff:   %ld\t%.4f [%%]\n", p->good_diff_q10, 100.0 * p->good_diff_q10 / (p->mem_align_q10 - p->hit_p_q10));
 	fprintf(stderr, "Primary for Q20: %ld\n", p->mem_align_q20);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q20, 100.0 * p->hit_p_q20 / p->mem_align_q20);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q20, 100.0 * p->hit_nm_q20 / p->no_clip_q20);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q20, 100.0 * p->hit_nm_q20 / p->mem_align_q20);
+	fprintf(stderr, "    Good Diff:   %ld\t%.4f [%%]\n", p->good_diff_q20, 100.0 * p->good_diff_q20 / (p->mem_align_q20 - p->hit_p_q20));
 	fprintf(stderr, "Primary for Q30: %ld\n", p->mem_align_q30);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q30, 100.0 * p->hit_p_q30 / p->mem_align_q30);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q30, 100.0 * p->hit_nm_q30 / p->no_clip_q30);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q30, 100.0 * p->hit_nm_q30 / p->mem_align_q30);
+	fprintf(stderr, "    Good Diff:   %ld\t%.4f [%%]\n", p->good_diff_q30, 100.0 * p->good_diff_q30 / (p->mem_align_q30 - p->hit_p_q30));
 	fprintf(stderr, "Primary for Q40: %ld\n", p->mem_align_q40);
 	fprintf(stderr, "    POS:         %ld\t%.4f [%%]\n", p->hit_p_q40, 100.0 * p->hit_p_q40 / p->mem_align_q40);
-	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q40, 100.0 * p->hit_nm_q40 / p->no_clip_q40);
+	fprintf(stderr, "    NM:          %ld\t%.4f [%%]\n", p->hit_nm_q40, 100.0 * p->hit_nm_q40 / p->mem_align_q40);
+	fprintf(stderr, "    Good Diff:   %ld\t%.4f [%%]\n", p->good_diff_q40, 100.0 * p->good_diff_q40 / (p->mem_align_q40 - p->hit_p_q40));
 }
 
 static int usage() {
