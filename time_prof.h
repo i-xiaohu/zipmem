@@ -27,15 +27,11 @@ static void zsmem_prof_output(zsmem_prof_t *a) {
 	int i;
 	for (i = 1; i < 256; i++) a->mis_n[0] += a->mis_n[i];
 	for (i = 1; i < 256; i++) a->reused_n[0] += a->reused_n[i];
-
-	fprintf(stderr, "gencs_time  \t%.1f\t%.1f\t%.1fX\n",
-		 a->t_gencs[0], a->t_gencs[1], a->t_gencs[0]/a->t_gencs[1]);
-	fprintf(stderr, "csseed_time \t%.1f\t%.1f\t%.1fX\n",
-		 a->t_csseed[0], a->t_csseed[1], a->t_csseed[0]/a->t_csseed[1]);
-	fprintf(stderr, "input_reads\t%ld\n", a->reads_n);
-	fprintf(stderr, "read_len\t%ld\n", a->read_len);
-	fprintf(stderr, "Compression ration  \t%.2f\n", 1.0*a->reads_n*a->read_len/a->cs_bases);
-	fprintf(stderr, "Mismatches number   \t%.2f\n", 1.0*a->mis_n[0]/a->reads_n);
+	for (i = 1; i < 256; i++) a->sup_n[0] += a->sup_n[i];
+	fprintf(stderr, "Reads number        \t%ld\n", a->reads_n);
+	fprintf(stderr, "Read length         \t%ld\n", a->read_len);
+	fprintf(stderr, "Compression ratio   \t%.2f X\n", 1.0*(a->reads_n*a->read_len)/a->cs_bases);
+	fprintf(stderr, "Mismatch percentage \t%.2f %%\n", 100.0*a->mis_n[0]/(a->reads_n*a->read_len));
 	fprintf(stderr, "Reused seeds        \t%.2f\n", 1.0*a->reused_n[0]/a->reads_n);
 	fprintf(stderr, "Supplementary seeds \t%.2f\n", 1.0*a->sup_n[0]/a->reads_n);
 }

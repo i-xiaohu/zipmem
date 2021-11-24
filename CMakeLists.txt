@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(zip_seeding C)
+project(zipmem C)
 
 set(CMAKE_C_STANDARD 99)
 set(exe zipmem)
@@ -76,21 +76,10 @@ add_executable(check
         samop.c
         samop.h
         check_seed.c)
-target_link_libraries(check -lz -lrt)
+target_link_libraries(check -lz -lpthread -lrt)
 
 add_executable(bwaidx
         ${FM_index}
         ${bwalib}
         FM_index/main.c)
 target_link_libraries(bwaidx -lz -lrt)
-
-add_executable(study_diff
-        ${cstl}
-        ${bwalib}
-        ${FM_index}
-        study_diff.c
-        samop.c
-        samop.h
-        read_input.c
-        read_input.h)
-target_link_libraries(study_diff -lz -lrt)

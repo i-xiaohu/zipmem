@@ -39,7 +39,6 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 	ktp_data_t *data = (ktp_data_t*)_data;
 	int i;
 	if (step == 0) {
-		double rtime_s = realtime();
 		ktp_data_t *ret;
 		int64_t size = 0;
 		ret = calloc(1, sizeof(ktp_data_t));
@@ -56,10 +55,6 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 				ret->seqs[i].comment = 0;
 			}
 		for (i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
-		double rtime_e = realtime();
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step1] Input %ldM bases in %.1f real sec\n",
-		        __func__, size / 1000 / 1000, rtime_e-rtime_s);
 		return ret;
 	} else if (step == 1) {
 		double ctime_s = cputime(), rtime_s = realtime();
@@ -68,13 +63,9 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 		zipmem_seeding(opt, idx->bwt, data->n_seqs, data->seqs);
 		aux->n_processed += data->n_seqs;
 		double ctime_e = cputime(), rtime_e = realtime();
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step2] Seeding for %d reads in %.1f CPU sec, %.1f real sec, %.1fX CPU usage\n",
-		        __func__, data->n_seqs, ctime_e-ctime_s, rtime_e-rtime_s, (ctime_e-ctime_s)/(rtime_e-rtime_s));
 		zmp.t_seeding[0] += ctime_e - ctime_s; zmp.t_seeding[1] += rtime_e - rtime_s;
 		return data;
 	} else if (step == 2) {
-		double rtime_s = realtime();
 		for (i = 0; i < data->n_seqs; ++i) {
 			// sam here is used to stores the seeds and the preceding number indicating memory cost.
 			long bytes = *(long*)data->seqs[i].sam + sizeof(long);
@@ -84,10 +75,10 @@ static void *tp_seeding(void *shared, int step, void *_data) {
 			free(data->seqs[i].seq); free(data->seqs[i].qual);
 		}
 		free(data->seqs); free(data);
-		double rtime_e = realtime();
-		if (bwa_verbose >= 3)
-			fprintf(stderr, "[%s_step3] Output seeds in %.1f real sec, %ld reads have been processed\n",
-		        __func__ , rtime_e-rtime_s, aux->n_processed);
+		fprintf(stderr, "\033[K");
+		fprintf(stderr, "\033[33mSeeding for %ld reads costs %.1f CPU seconds, %.1f real seconds.\033[0m\n",
+	        aux->n_processed, zmp.t_seeding[0], zmp.t_seeding[1]);
+		fprintf(stderr, "\033[1A");
 		return 0;
 	}
 	return 0;
@@ -170,7 +161,8 @@ int main(int argc, char *argv[]) {
 	memset(&zmp, 0, sizeof(zmp));
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 	kt_pipeline(no_mt_io? 1 : 2, tp_seeding, &aux, 3);
-	zsmem_prof_output(&zmp);
+	fprintf(stderr, "\n");
+//	zsmem_prof_output(&zmp);
 
 	free(opt);
 	bwa_idx_destroy(aux.idx);
@@ -185,11 +177,8 @@ int main(int argc, char *argv[]) {
 	err_fclose(stdout);
 	fprintf(stderr, "Zipmem Version: %s\n", ZIPMEM_VERSION);
 	fprintf(stderr, "CMD:");
-	for (i = 0; i < argc; ++i) fprintf(stderr, " %s", argv[i]);
-	fprintf(stderr, "\n");
-	fprintf(stderr, "Seeding:     %.2f CPU sec, %.2f real sec\n", zmp.t_seeding[0], zmp.t_seeding[1]);
-	fprintf(stderr, "Extra IO:    %.2f CPU sec, %.2f real sec\n", cputime()-zmp.t_seeding[0], realtime()-rtime-zmp.t_seeding[1]);
-	fprintf(stderr, "The extra IO is the time cost of writing seeds into disk. But it does not happen in real mapping scenario,\n");
-	fprintf(stderr, "where seeds are buffered in memory. Please exclude the extra IO time.\n");
+	for (i = 0; i < argc; ++i) fprintf(stderr, " %s", argv[i]); fprintf(stderr, "\n");
+	fprintf(stderr, "Note: The time cost of writing seeds into disk is excluded. Because it does not happen in real alignment scenario, ");
+	fprintf(stderr, "where seeds are buffered in memory.\n");
 	return 0;
 }
