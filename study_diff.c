@@ -93,9 +93,35 @@ static seed_v parse_encoded_seeds(const uint8_t *enc_seeds) {
 	return seeds;
 }
 
+static inline int clip_len(const char *cigar, int ask_left) {
+	int i, temp = 0, len = strlen(cigar);
+	if (ask_left) {
+		for (i = 0; i < len; i++) {
+			if (cigar[i] >= '0' && cigar[i] <= '9') {
+				temp *= 10;
+				temp += cigar[i] - '0';
+			} else if (cigar[i] == 'S') {
+				return temp;
+			} else return 0; // No left clipping
+		}
+	} else {
+		if (cigar[len-1] != 'S') return 0; // No right clipping
+		for (i = len-2; i >= 0; i--) if (cigar[i] < '0' || cigar[i] > '9') break;
+		for (i = i+1; i < len-1; i++) {
+			temp *= 10;
+			temp += cigar[i] - '0';
+		}
+		return temp;
+	}
+	assert(temp == 0);
+	return temp;
+}
+
 static void process(const uint8_t *zseed, const uint8_t *mseed, const sam_line_t *zsam, const sam_line_t *msam) {
 	int i;
-	if (zsam->pos != msam->pos && msam->mapq > 40) {
+	if (zsam->pos == msam->pos && zsam->nm != msam->nm) {
+		if (clip_len(zsam->cigar, 0) + clip_len(zsam->cigar, 1) != 0) return;
+		if (clip_len(msam->cigar, 0) + clip_len(msam->cigar, 1) != 0) return;
 		seed_v mem_seeds = parse_encoded_seeds(mseed);
 		seed_v zip_seeds = parse_encoded_seeds(zseed);
 		fprintf(stdout, "Read: %s\n", zsam->qname); assert(!strcmp(msam->qname, zsam->qname));

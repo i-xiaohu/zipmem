@@ -19,7 +19,15 @@ set(FM_index
         FM_index/bntseq.c
         FM_index/bntseq.h
         FM_index/bwt.c
-        FM_index/bwt.h)
+        FM_index/bwt.h
+        FM_index/bwt_gen.c
+        FM_index/is.c
+        FM_index/QSufSort.c
+        FM_index/QSufSort.h
+        FM_index/rle.c
+        FM_index/rle.h
+        FM_index/rope.c
+        FM_index/rope.h)
 
 set(bwalib
         bwalib/bwa.c
@@ -44,7 +52,9 @@ add_executable(bwamem
         ${FM_index}
         ${bwalib}
         ${bwamem}
-        bwamem/main_mem.c)
+        bwamem/main_mem.c
+        read_input.c
+        read_input.h)
 target_link_libraries(bwamem -lm -lz -lpthread -lrt)
 
 add_executable(${exe}
@@ -54,11 +64,33 @@ add_executable(${exe}
         ${bwamem}
         zipmem.c
         zipmem.h
+        read_input.c
+        read_input.h
         main.c)
 target_link_libraries(${exe} -lm -lz -lpthread -lrt)
 
 add_executable(check
-        ${bwalib}
+        ${cstl}
         ${FM_index}
+        ${bwalib}
+        samop.c
+        samop.h
         check_seed.c)
 target_link_libraries(check -lz -lrt)
+
+add_executable(bwaidx
+        ${FM_index}
+        ${bwalib}
+        FM_index/main.c)
+target_link_libraries(bwaidx -lz -lrt)
+
+add_executable(study_diff
+        ${cstl}
+        ${bwalib}
+        ${FM_index}
+        study_diff.c
+        samop.c
+        samop.h
+        read_input.c
+        read_input.h)
+target_link_libraries(study_diff -lz -lrt)
